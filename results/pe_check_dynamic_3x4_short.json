@@ -1,0 +1,46 @@
+{
+  "device": "NVIDIA RTX A4000",
+  "device_index": 0,
+  "device_count": 2,
+  "compute_capability": "8.6",
+  "total_memory_mib": 16108,
+  "driver_version": "535.183.01",
+  "torch_version": "2.5.1+cu121",
+  "tensorrt_version": "10.8.0.43",
+  "cuda_runtime": "12.1",
+  "engine_kind": "dynamic (min=1, opt=16, max=32)",
+  "engine_path": "assets/model/PE-Core-L14-336_vision_dynamic.engine",
+  "schedule": "3x batch=4",
+  "channels_per_cycle": 12,
+  "warmup_iters": 5,
+  "measure_iters": 25,
+  "realtime_budget_ms": 500.0,
+  "inference_only_ms": {
+    "n": 25,
+    "mean": 351.486,
+    "std": 62.619,
+    "min": 314.877,
+    "p50": 322.69,
+    "p95": 520.163,
+    "p99": 536.81,
+    "max": 536.81
+  },
+  "full_cycle_ms": {
+    "n": 25,
+    "mean": 456.162,
+    "std": 61.93,
+    "min": 397.174,
+    "p50": 433.833,
+    "p95": 600.088,
+    "p99": 638.371,
+    "max": 638.371
+  },
+  "gpu_temp_c_min": 80,
+  "gpu_temp_c_max": 95,
+  "log_files": {
+    "iter": "results/pe_check_dynamic_3x4_short.log",
+    "plot": "results/pe_check_dynamic_3x4_short.png"
+  },
+  "inference_only_meets_500ms": true,
+  "full_cycle_meets_500ms": true
+}

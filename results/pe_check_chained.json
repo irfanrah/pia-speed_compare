@@ -1,0 +1,77 @@
+{
+  "device": "NVIDIA RTX A4000",
+  "device_index": 0,
+  "device_count": 2,
+  "compute_capability": "8.6",
+  "total_memory_mib": 16108,
+  "driver_version": "535.183.01",
+  "torch_version": "2.5.1+cu121",
+  "tensorrt_version": "10.8.0.43",
+  "cuda_runtime": "12.1",
+  "precision": "fp16",
+  "input_shape": [
+    3,
+    336,
+    336
+  ],
+  "engine_profile": {
+    "min": 1,
+    "opt": 16,
+    "max": 32
+  },
+  "target_channels": 12,
+  "realtime_budget_ms": 500.0,
+  "sample_image": "assets/images/dog.jpg",
+  "warmup_iters": 10,
+  "measure_iters": 30,
+  "results": [
+    {
+      "schedule": "3x batch=4",
+      "n_infer": 3,
+      "batch": 4,
+      "channels_per_cycle": 12,
+      "inference_only_ms_mean": 324.567,
+      "inference_only_ms_p95": 328.657,
+      "full_cycle_ms_mean": 503.061,
+      "full_cycle_ms_p95": 628.774,
+      "inference_only_meets_500ms": true,
+      "full_cycle_meets_500ms": false
+    },
+    {
+      "schedule": "4x batch=3",
+      "n_infer": 4,
+      "batch": 3,
+      "channels_per_cycle": 12,
+      "inference_only_ms_mean": 1723.792,
+      "inference_only_ms_p95": 1812.58,
+      "full_cycle_ms_mean": 1876.009,
+      "full_cycle_ms_p95": 1934.007,
+      "inference_only_meets_500ms": false,
+      "full_cycle_meets_500ms": false
+    },
+    {
+      "schedule": "6x batch=2",
+      "n_infer": 6,
+      "batch": 2,
+      "channels_per_cycle": 12,
+      "inference_only_ms_mean": 1967.177,
+      "inference_only_ms_p95": 2048.453,
+      "full_cycle_ms_mean": 2131.634,
+      "full_cycle_ms_p95": 2171.871,
+      "inference_only_meets_500ms": false,
+      "full_cycle_meets_500ms": false
+    },
+    {
+      "schedule": "12x batch=1",
+      "n_infer": 12,
+      "batch": 1,
+      "channels_per_cycle": 12,
+      "inference_only_ms_mean": 2240.103,
+      "inference_only_ms_p95": 2276.867,
+      "full_cycle_ms_mean": 2309.467,
+      "full_cycle_ms_p95": 2362.975,
+      "inference_only_meets_500ms": false,
+      "full_cycle_meets_500ms": false
+    }
+  ]
+}

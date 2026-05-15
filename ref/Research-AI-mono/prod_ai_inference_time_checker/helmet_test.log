@@ -1,0 +1,20 @@
+================================== Start Test Batch Size: 1 ==================================
+helmet_cv : True
+helmet_cv : False
+helmet_cv : True
+helmet_cv : False
+    total  model1_preprocess  model1_inference  model1_nms  model2_batch_make  model2_preprocess  model2_inference  postprocess_logic  send_alarm
+11.591784           3.847823          3.785104    1.768918           0.154147            0.27073          1.449799           0.139332    0.175932
+================================== End Test Batch Size: 1 ==================================
+================================== Start Test Batch Size: 2 ==================================
+helmet_cv : True
+helmet_cv : True
+helmet_cv : False
+helmet_cv : False
+helmet_cv : True
+helmet_cv : True
+helmet_cv : False
+helmet_cv : False
+    total  model1_preprocess  model1_inference  model1_nms  model2_batch_make  model2_preprocess  model2_inference  postprocess_logic  send_alarm
+15.196751           6.399997          3.976147    2.003774           0.270745           0.421876          1.676495           0.170692    0.277025
+================================== End Test Batch Size: 2 ==================================

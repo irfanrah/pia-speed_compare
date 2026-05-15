@@ -1,0 +1,67 @@
+{
+  "device": "NVIDIA RTX A4000",
+  "device_index": 0,
+  "device_count": 2,
+  "compute_capability": "8.6",
+  "total_memory_mib": 16108,
+  "driver_version": "535.183.01",
+  "torch_version": "2.5.1+cu121",
+  "tensorrt_version": "10.8.0.43",
+  "cuda_runtime": "12.1",
+  "engine_kind": "dynamic (min=1, opt=16, max=32)",
+  "engine_path": "assets/model/PE-Core-L14-336_vision_dynamic.engine",
+  "schedule": "3x batch=4",
+  "channels_per_cycle": 12,
+  "warmup_iters": 20,
+  "measure_iters": 100,
+  "rest_after_iter": 50,
+  "rest_seconds": 60,
+  "realtime_budget_ms": 500.0,
+  "log_files": {
+    "iter": "results/pe_check_dynamic_3x4_thermal.log",
+    "rest": "results/pe_check_dynamic_3x4_thermal_rest.log",
+    "plot": "results/pe_check_dynamic_3x4_thermal.png"
+  },
+  "inference_only_ms": {
+    "n": 100,
+    "mean": 1402.954,
+    "std": 719.969,
+    "min": 318.965,
+    "p50": 1752.017,
+    "p95": 2207.897,
+    "p99": 2233.439,
+    "max": 2248.434
+  },
+  "full_cycle_ms": {
+    "n": 100,
+    "mean": 1520.838,
+    "std": 712.022,
+    "min": 402.975,
+    "p50": 1855.267,
+    "p95": 2319.203,
+    "p99": 2342.072,
+    "max": 2390.27
+  },
+  "inference_only_ms_pre_rest": {
+    "n": 50,
+    "mean": 1092.312,
+    "std": 678.608,
+    "min": 318.965,
+    "p50": 875.803,
+    "p95": 1797.621,
+    "p99": 1857.393,
+    "max": 1857.393
+  },
+  "inference_only_ms_post_rest": {
+    "n": 50,
+    "mean": 1713.596,
+    "std": 624.375,
+    "min": 344.015,
+    "p50": 1933.415,
+    "p95": 2233.378,
+    "p99": 2248.434,
+    "max": 2248.434
+  },
+  "gpu_temp_c_min": 86,
+  "gpu_temp_c_max": 102
+}

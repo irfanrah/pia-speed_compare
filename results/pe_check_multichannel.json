@@ -1,0 +1,127 @@
+{
+  "device": "NVIDIA RTX A4000",
+  "device_index": 0,
+  "device_count": 2,
+  "compute_capability": "8.6",
+  "total_memory_mib": 16108,
+  "driver_version": "535.183.01",
+  "torch_version": "2.5.1+cu121",
+  "tensorrt_version": "10.8.0.43",
+  "cuda_runtime": "12.1",
+  "precision": "fp16",
+  "input_shape": [
+    3,
+    336,
+    336
+  ],
+  "engine_profile": {
+    "min": 1,
+    "opt": 16,
+    "max": 32
+  },
+  "scheduling": "batch=1 sequential per cycle",
+  "realtime_budget_ms": 500.0,
+  "target_channels": 12,
+  "sample_image": "assets/images/dog.jpg",
+  "warmup_iters": 20,
+  "measure_iters": 50,
+  "results": [
+    {
+      "channels": 1,
+      "cycle_total_ms": 39.593,
+      "per_channel_ms": 39.593,
+      "p95_cycle_ms": 44.408,
+      "fps_aggregate": 25.26,
+      "meets_500ms_cycle": true
+    },
+    {
+      "channels": 2,
+      "cycle_total_ms": 67.836,
+      "per_channel_ms": 33.918,
+      "p95_cycle_ms": 70.31,
+      "fps_aggregate": 29.48,
+      "meets_500ms_cycle": true
+    },
+    {
+      "channels": 4,
+      "cycle_total_ms": 133.612,
+      "per_channel_ms": 33.403,
+      "p95_cycle_ms": 148.834,
+      "fps_aggregate": 29.94,
+      "meets_500ms_cycle": true
+    },
+    {
+      "channels": 6,
+      "cycle_total_ms": 542.051,
+      "per_channel_ms": 90.342,
+      "p95_cycle_ms": 964.716,
+      "fps_aggregate": 11.07,
+      "meets_500ms_cycle": false
+    },
+    {
+      "channels": 8,
+      "cycle_total_ms": 1303.156,
+      "per_channel_ms": 162.895,
+      "p95_cycle_ms": 1360.346,
+      "fps_aggregate": 6.14,
+      "meets_500ms_cycle": false
+    },
+    {
+      "channels": 10,
+      "cycle_total_ms": 1783.46,
+      "per_channel_ms": 178.346,
+      "p95_cycle_ms": 1894.563,
+      "fps_aggregate": 5.61,
+      "meets_500ms_cycle": false
+    },
+    {
+      "channels": 12,
+      "cycle_total_ms": 2397.133,
+      "per_channel_ms": 199.761,
+      "p95_cycle_ms": 2464.698,
+      "fps_aggregate": 5.01,
+      "meets_500ms_cycle": false
+    },
+    {
+      "channels": 14,
+      "cycle_total_ms": 2917.253,
+      "per_channel_ms": 208.375,
+      "p95_cycle_ms": 2972.177,
+      "fps_aggregate": 4.8,
+      "meets_500ms_cycle": false
+    },
+    {
+      "channels": 16,
+      "cycle_total_ms": 3454.053,
+      "per_channel_ms": 215.878,
+      "p95_cycle_ms": 3531.028,
+      "fps_aggregate": 4.63,
+      "meets_500ms_cycle": false
+    },
+    {
+      "channels": 20,
+      "cycle_total_ms": 4430.216,
+      "per_channel_ms": 221.511,
+      "p95_cycle_ms": 4550.441,
+      "fps_aggregate": 4.51,
+      "meets_500ms_cycle": false
+    },
+    {
+      "channels": 24,
+      "cycle_total_ms": 5391.17,
+      "per_channel_ms": 224.632,
+      "p95_cycle_ms": 5513.521,
+      "fps_aggregate": 4.45,
+      "meets_500ms_cycle": false
+    }
+  ],
+  "target_result": {
+    "channels": 12,
+    "cycle_total_ms": 2397.133,
+    "per_channel_ms": 199.761,
+    "p95_cycle_ms": 2464.698,
+    "fps_aggregate": 5.01,
+    "meets_500ms_cycle": false
+  },
+  "pass": false
+}

@@ -1,0 +1,200 @@
+{
+  "device": "NVIDIA RTX A4000",
+  "device_index": 0,
+  "device_count": 2,
+  "compute_capability": "8.6",
+  "total_memory_mib": 16108,
+  "driver_version": "535.183.01",
+  "torch_version": "2.5.1+cu121",
+  "tensorrt_version": "10.8.0.43",
+  "cuda_runtime": "12.1",
+  "precision": "fp16",
+  "input_shape": [
+    3,
+    336,
+    336
+  ],
+  "engine_profile": {
+    "min": 1,
+    "opt": 16,
+    "max": 32
+  },
+  "realtime_budget_ms": 500.0,
+  "target_channels": 12,
+  "sample_image": "assets/images/dog.jpg",
+  "warmup_iters": 20,
+  "measure_iters": 50,
+  "results": [
+    {
+      "batch": 1,
+      "total": 38.374,
+      "model_preprocess": 11.455,
+      "model_inference": 26.632,
+      "postprocess_logic": 0.287,
+      "p95_total_ms": 39.592,
+      "images_per_sec": 26.06,
+      "meets_realtime_500ms": true
+    },
+    {
+      "batch": 2,
+      "total": 78.349,
+      "model_preprocess": 25.93,
+      "model_inference": 52.078,
+      "postprocess_logic": 0.341,
+      "p95_total_ms": 82.036,
+      "images_per_sec": 25.53,
+      "meets_realtime_500ms": true
+    },
+    {
+      "batch": 3,
+      "total": 117.806,
+      "model_preprocess": 39.644,
+      "model_inference": 77.798,
+      "postprocess_logic": 0.364,
+      "p95_total_ms": 134.536,
+      "images_per_sec": 25.47,
+      "meets_realtime_500ms": true
+    },
+    {
+      "batch": 4,
+      "total": 186.754,
+      "model_preprocess": 46.028,
+      "model_inference": 140.369,
+      "postprocess_logic": 0.357,
+      "p95_total_ms": 213.881,
+      "images_per_sec": 21.42,
+      "meets_realtime_500ms": true
+    },
+    {
+      "batch": 5,
+      "total": 681.28,
+      "model_preprocess": 45.278,
+      "model_inference": 635.656,
+      "postprocess_logic": 0.346,
+      "p95_total_ms": 741.477,
+      "images_per_sec": 7.34,
+      "meets_realtime_500ms": false
+    },
+    {
+      "batch": 6,
+      "total": 888.532,
+      "model_preprocess": 54.804,
+      "model_inference": 833.377,
+      "postprocess_logic": 0.351,
+      "p95_total_ms": 914.305,
+      "images_per_sec": 6.75,
+      "meets_realtime_500ms": false
+    },
+    {
+      "batch": 7,
+      "total": 1162.169,
+      "model_preprocess": 62.017,
+      "model_inference": 1099.764,
+      "postprocess_logic": 0.388,
+      "p95_total_ms": 1212.498,
+      "images_per_sec": 6.02,
+      "meets_realtime_500ms": false
+    },
+    {
+      "batch": 8,
+      "total": 1526.774,
+      "model_preprocess": 70.1,
+      "model_inference": 1456.289,
+      "postprocess_logic": 0.385,
+      "p95_total_ms": 1559.224,
+      "images_per_sec": 5.24,
+      "meets_realtime_500ms": false
+    },
+    {
+      "batch": 9,
+      "total": 1872.096,
+      "model_preprocess": 76.819,
+      "model_inference": 1794.87,
+      "postprocess_logic": 0.407,
+      "p95_total_ms": 1915.687,
+      "images_per_sec": 4.81,
+      "meets_realtime_500ms": false
+    },
+    {
+      "batch": 10,
+      "total": 2189.722,
+      "model_preprocess": 79.766,
+      "model_inference": 2109.544,
+      "postprocess_logic": 0.412,
+      "p95_total_ms": 2239.241,
+      "images_per_sec": 4.57,
+      "meets_realtime_500ms": false
+    },
+    {
+      "batch": 11,
+      "total": 2484.495,
+      "model_preprocess": 93.347,
+      "model_inference": 2390.743,
+      "postprocess_logic": 0.406,
+      "p95_total_ms": 2565.094,
+      "images_per_sec": 4.43,
+      "meets_realtime_500ms": false
+    },
+    {
+      "batch": 12,
+      "total": 2793.051,
+      "model_preprocess": 101.49,
+      "model_inference": 2691.172,
+      "postprocess_logic": 0.389,
+      "p95_total_ms": 2840.599,
+      "images_per_sec": 4.3,
+      "meets_realtime_500ms": false
+    },
+    {
+      "batch": 13,
+      "total": 3051.515,
+      "model_preprocess": 119.963,
+      "model_inference": 2931.093,
+      "postprocess_logic": 0.458,
+      "p95_total_ms": 3171.613,
+      "images_per_sec": 4.26,
+      "meets_realtime_500ms": false
+    },
+    {
+      "batch": 14,
+      "total": 3380.889,
+      "model_preprocess": 122.362,
+      "model_inference": 3258.067,
+      "postprocess_logic": 0.46,
+      "p95_total_ms": 3461.473,
+      "images_per_sec": 4.14,
+      "meets_realtime_500ms": false
+    },
+    {
+      "batch": 15,
+      "total": 3624.713,
+      "model_preprocess": 115.86,
+      "model_inference": 3508.446,
+      "postprocess_logic": 0.407,
+      "p95_total_ms": 3740.004,
+      "images_per_sec": 4.14,
+      "meets_realtime_500ms": false
+    },
+    {
+      "batch": 16,
+      "total": 3691.429,
+      "model_preprocess": 136.934,
+      "model_inference": 3554.067,
+      "postprocess_logic": 0.428,
+      "p95_total_ms": 3813.003,
+      "images_per_sec": 4.33,
+      "meets_realtime_500ms": false
+    }
+  ],
+  "target_result": {
+    "batch": 12,
+    "total": 2793.051,
+    "model_preprocess": 101.49,
+    "model_inference": 2691.172,
+    "postprocess_logic": 0.389,
+    "p95_total_ms": 2840.599,
+    "images_per_sec": 4.3,
+    "meets_realtime_500ms": false
+  },
+  "pass": false
+}

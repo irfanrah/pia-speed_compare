@@ -1,0 +1,39 @@
+{
+  "device": "NVIDIA RTX A4000",
+  "device_index": 0,
+  "device_count": 2,
+  "compute_capability": "8.6",
+  "total_memory_mib": 16108,
+  "driver_version": "535.183.01",
+  "torch_version": "2.5.1+cu121",
+  "tensorrt_version": "10.8.0.43",
+  "cuda_runtime": "12.1",
+  "precision": "fp16",
+  "input_shape": [
+    3,
+    336,
+    336
+  ],
+  "engine_kind": "fixed (min=opt=max=fixed_batch)",
+  "fixed_batch": 4,
+  "n_infer_per_cycle": 3,
+  "target_channels": 12,
+  "realtime_budget_ms": 500.0,
+  "engine_path": "assets/model/PE-Core-L14-336_vision_b4.engine",
+  "sample_image": "assets/images/dog.jpg",
+  "warmup_iters": 10,
+  "measure_iters": 30,
+  "result": {
+    "fixed_batch": 4,
+    "n_infer": 3,
+    "channels_per_cycle": 12,
+    "single_batch_ms_mean": 265.628,
+    "single_batch_ms_p95": 320.638,
+    "inference_only_ms_mean": 963.44,
+    "inference_only_ms_p95": 977.113,
+    "full_cycle_ms_mean": 1092.551,
+    "full_cycle_ms_p95": 1125.527,
+    "inference_only_meets_500ms": false,
+    "full_cycle_meets_500ms": false
+  }
+}

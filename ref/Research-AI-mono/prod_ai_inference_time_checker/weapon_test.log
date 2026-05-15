@@ -1,0 +1,26 @@
+[11/07/2025-18:13:16] [TRT] [E] IRuntime::deserializeCudaEngine: Error Code 1: Serialization (Serialization assertion plan->header.magicTag == rt::kPLAN_MAGIC_TAG failed.Trying to load an engine created with incompatible serialization version. Check that the engine was not created using safety runtime, same OS was used and version compatibility parameters were set accordingly.)
+INFO : reload - with meta data
+================================== Start Test Batch Size: 1 ==================================
+weapon_cv : True
+weapon_cv : False
+weapon_cv : True
+weapon_cv : False
+weapon_cv : True
+    total  model1_preprocess  model1_inference  model1_nms  model2_batch_make  model2_preprocess  model2_inference  model2_nms  postprocess_logic  send_alarm
+30.314249           3.922164          3.458599    1.660575           1.657117           0.595094         17.685039    1.222721            0.08728     0.02566
+================================== End Test Batch Size: 1 ==================================
+================================== Start Test Batch Size: 2 ==================================
+weapon_cv : False
+weapon_cv : True
+weapon_cv : True
+weapon_cv : False
+weapon_cv : False
+weapon_cv : True
+weapon_cv : True
+weapon_cv : False
+weapon_cv : False
+weapon_cv : True
+weapon_cv : True
+    total  model1_preprocess  model1_inference  model1_nms  model2_batch_make  model2_preprocess  model2_inference  model2_nms  postprocess_logic  send_alarm
+55.706144           6.172522          3.942877    1.988946           3.260678           0.903849         37.352002    1.927364           0.127008    0.030898
+================================== End Test Batch Size: 2 ==================================
