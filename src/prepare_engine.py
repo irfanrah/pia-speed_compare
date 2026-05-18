@@ -97,11 +97,25 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-frames", type=int, default=1, help="ftpe only")
     p.add_argument("--opt-frames", type=int, default=8, help="ftpe only")
     p.add_argument("--max-frames", type=int, default=16, help="ftpe only")
+    p.add_argument("--extra-hf-file", action="append", default=[],
+                   help="Additional repo-relative file to fetch (e.g. text_features.json). "
+                        "Pass as REPO_PATH:LOCAL_PATH or just REPO_PATH (saved next to --onnx).")
     return p.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+
+    # Extra companion files (e.g. text_features.json) are always fetched if
+    # missing, even when the engine already exists.
+    for spec in args.extra_hf_file:
+        if ":" in spec:
+            repo_path, local_path = spec.split(":", 1)
+            dest = Path(local_path)
+        else:
+            repo_path = spec
+            dest = args.onnx.parent / Path(repo_path).name
+        download_onnx(args.hf_repo, repo_path, dest)
 
     if args.engine.exists():
         print(f"[prepare] engine already at {args.engine} "

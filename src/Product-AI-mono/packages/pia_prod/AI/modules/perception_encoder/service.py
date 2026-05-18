@@ -76,27 +76,26 @@ class PEService(ServiceBase):
         stream_ids = datas["stream_ids"]
         user_params = datas["user_params"]
 
+        image_cuda = self._preprocess_stage(batches, user_params)
+        visual_vectors = self._inference_stage(image_cuda)
+        return self._postprocess_stage(visual_vectors, batches, stream_ids, user_params)
+
+    def _preprocess_stage(self, batches, user_params):
         if not self.is_torch_batches(batches, speed_mode=True):
             cv_bgr2rgb_batch(batches)
-
-        # target_txt_vector, target_sentences = self.txtvec_manager.update(
-        #   stream_ids, user_params) # FIX : prompts 고정으로 하기로 함
-
-        # batch encode
-        # sequnce length 1로 고정
         cropped_batches = self.roi_manager.process_batches_with_roi(batches, user_params)
-        image_cuda = preprocess_image(cropped_batches)
-        # torch_batches = torch.from_numpy(np.stack(batches, axis=0)).to(DEVICE)
-        visual_vectors = self.model(image_cuda)
+        return preprocess_image(cropped_batches)
+
+    def _inference_stage(self, image_cuda):
+        return self.model(image_cuda)
+
+    def _postprocess_stage(self, visual_vectors, batches, stream_ids, user_params):
         for stream_id, visual_vector in zip(stream_ids, visual_vectors):
-            # FIX : image 기반으로 처리하기로 함
             while (
                 self.stream_vector_queues[stream_id].__len__() < TEMPORAL_SIZE
             ):  # temporal size 1 로 설정함
                 self.stream_vector_queues[stream_id].append(self.zero_mask_vec)
-            self.stream_vector_queues[stream_id].append(
-                visual_vector
-            )  # TODO : 연결 끊긴 스트림은 삭제 해야함
+            self.stream_vector_queues[stream_id].append(visual_vector)
 
         alarms, predict_infos = self.alarm_event_manager(
             self.stream_vector_queues, stream_ids, user_params

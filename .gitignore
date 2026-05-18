@@ -12,6 +12,13 @@ env/
 # Model files (too large for GitHub)
 assets/model/*.engine
 assets/model/*.onnx
+assets/model/*.json
+
+# Benchmark runtime artifacts
+logs/
+results/*.json
+results/*.png
+results/summary.txt
 
 # OS
 .DS_Store

@@ -1,17 +1,18 @@
-"""Speed benchmark for perception_encoder (PE-Core-L14-336) TRT model.
+"""Speed benchmark for perception_encoder via the real PEService pipeline.
 
-Loads ``TRTInference`` and ``preprocess_image`` directly from
-``pia_prod.AI.modules.perception_encoder`` so the benchmark exercises the
-exact same code path used in production.
+Instantiates ``pia_prod.AI.modules.perception_encoder.service.PEService`` and
+times the three split stages exposed in ``_detect`` -- the same code path
+production runs:
 
-Measures three stages per iteration:
+    full_cycle:  disk read -> _preprocess_stage -> _inference_stage
+                 -> _postprocess_stage   (end-to-end: includes cos sim + alarm)
+    half_cycle:  in-memory ndarray -> _preprocess_stage -> _inference_stage
+                                                          (stops at img emb)
+    inference:   already-preprocessed CUDA tensor -> _inference_stage
+                                                          (stops at img emb)
 
-    full_cycle:  disk read -> preprocess -> inference   (end-to-end)
-    half_cycle:  in-memory ndarray -> preprocess -> inference
-    inference:   already-preprocessed CUDA tensor -> inference
-
-Emits a JSON to ``results/`` with the run start time, GPU name, batch size,
-GPU temperature samples, and per-stage timing stats.
+GPU temperature is polled per iter via NVML when ``pynvml`` is installed,
+falling back to nvidia-smi otherwise.
 """
 
 from __future__ import annotations
@@ -22,7 +23,6 @@ import os
 import statistics
 import subprocess
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -33,25 +33,41 @@ from PIL import Image
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src" / "Product-AI-mono" / "packages"))
 
-from pia_prod.AI.modules.perception_encoder.trt_load import TRTInference  # noqa: E402
-from pia_prod.AI.modules.perception_encoder.trt_utils import preprocess_image  # noqa: E402
-
 DEFAULT_ENGINE = REPO_ROOT / "assets" / "model" / "PE-Core-L14-336_vision_dynamic.engine"
+DEFAULT_TXT = REPO_ROOT / "assets" / "model" / "text_features.json"
 DEFAULT_IMAGE = REPO_ROOT / "assets" / "images" / "kkpolice_1.jpg"
 DEFAULT_RESULTS_DIR = REPO_ROOT / "results"
 
-IMG_SIZE = (336, 336)
+
+# ---- Env-var injection BEFORE importing PEService ---------------------------
+# pia_prod.AI.modules.perception_encoder.config reads these at import time, so
+# we have to set them before the import chain starts.
+_pre = argparse.ArgumentParser(add_help=False)
+_pre.add_argument("--engine", type=Path, default=DEFAULT_ENGINE)
+_pre.add_argument("--text-features", type=Path, default=DEFAULT_TXT)
+_pre_args, _ = _pre.parse_known_args()
+os.environ["MODEL_PERCEPTION_ENCODER_TRT_PATH"] = str(_pre_args.engine)
+os.environ["MODEL_PERCEPTION_ENCODER_TXT_FEATURE_PATH"] = str(_pre_args.text_features)
+# -----------------------------------------------------------------------------
+
+from queue import Queue  # noqa: E402
+
+from pia.ai.tasks.T2VRet.models.PE.utils.complexity_check import (  # noqa: E402
+    time_call,
+    get_gpu_stats_nvml,
+)
+from pia_prod.AI.modules.perception_encoder.service import PEService  # noqa: E402
+from pia_prod.AI.modules.perception_encoder.config import IMG_SIZE  # noqa: E402
 
 
 def query_gpu_temp_c(device_index: int = 0) -> float | None:
+    stats = get_gpu_stats_nvml(f"cuda:{device_index}")
+    if stats and "temp_C" in stats:
+        return float(stats["temp_C"])
     try:
         out = subprocess.check_output(
-            [
-                "nvidia-smi",
-                f"--id={device_index}",
-                "--query-gpu=temperature.gpu",
-                "--format=csv,noheader,nounits",
-            ],
+            ["nvidia-smi", f"--id={device_index}",
+             "--query-gpu=temperature.gpu", "--format=csv,noheader,nounits"],
             text=True,
         ).strip()
         return float(out)
@@ -97,65 +113,81 @@ def stats(samples_ms: list[float]) -> dict:
     }
 
 
+def make_user_params(batch_size: int) -> list[dict]:
+    """Minimal user_param payloads required by PERoIManager + PEEventManager.
+    No retEvent matches roi_category_list, so ROI defaults to the whole frame."""
+    return [
+        {"user_param": {
+            "retEvent": ["fire_ret"],
+            "cameraId": f"cam_{i}",
+            "organization": "pia",
+        }}
+        for i in range(batch_size)
+    ]
+
+
 @torch.inference_mode()
 def benchmark(
-    engine_path: Path,
     image_path: Path,
     batch_size: int,
     warmup_iters: int,
     measure_iters: int,
 ) -> dict:
-    if not engine_path.exists():
-        raise FileNotFoundError(f"engine not found: {engine_path}")
     if not image_path.exists():
         raise FileNotFoundError(f"image not found: {image_path}")
 
-    model = TRTInference(str(engine_path))
+    service = PEService(Queue())
+    user_params = make_user_params(batch_size)
 
-    # Shared inputs reused across stages so the same workload is timed.
-    frame_ndarray = load_image_ndarray(image_path)
-    in_mem_batch = [frame_ndarray] * batch_size
-    preprocessed = preprocess_image(in_mem_batch, size=IMG_SIZE[0], device="cuda")
+    # cv_bgr2rgb_batch (called inside _preprocess_stage) mutates ndarrays in
+    # place, so each timed call needs fresh copies of the frame.
+    template = load_image_ndarray(image_path)
 
-    # Warmup all three code paths.
+    def fresh_batches() -> list[np.ndarray]:
+        return [template.copy() for _ in range(batch_size)]
+
+    # One preprocessed CUDA tensor reused across iters for the inference-only
+    # stage.
+    preprocessed = service._preprocess_stage(fresh_batches(), user_params)
+
+    # Warmup.
     for _ in range(warmup_iters):
-        x = preprocess_image(in_mem_batch, size=IMG_SIZE[0], device="cuda")
-        _ = model(x)
+        x = service._preprocess_stage(fresh_batches(), user_params)
+        _ = service._inference_stage(x)
     torch.cuda.synchronize()
 
     samples = {"full_cycle": [], "half_cycle": [], "inference": []}
     per_iter_temp: list[float | None] = []
-
     t_start = query_gpu_temp_c()
 
+    in_mem = fresh_batches()  # the "ndarray already in RAM" baseline buffer
+
+    stream_ids = [f"stream_{i}" for i in range(batch_size)]
+
     for _ in range(measure_iters):
-        # full_cycle: load from disk -> preprocess -> inference
-        t0 = time.perf_counter()
-        frame = load_image_ndarray(image_path)
-        batch = [frame] * batch_size
-        x = preprocess_image(batch, size=IMG_SIZE[0], device="cuda")
-        _ = model(x)
-        torch.cuda.synchronize()
-        t1 = time.perf_counter()
-        samples["full_cycle"].append((t1 - t0) * 1000.0)
+        # full_cycle: disk read -> preprocess -> inference -> postprocess.
+        # End-to-end: also runs the cos-sim + top-K + alarm event manager.
+        def _full():
+            batches = [load_image_ndarray(image_path) for _ in range(batch_size)]
+            x = service._preprocess_stage(batches, user_params)
+            v = service._inference_stage(x)
+            return service._postprocess_stage(v, batches, stream_ids, user_params)
+        _, dt = time_call(_full)
+        samples["full_cycle"].append(dt * 1000.0)
 
-        # half_cycle: in-memory ndarray -> preprocess -> inference
-        t0 = time.perf_counter()
-        x = preprocess_image(in_mem_batch, size=IMG_SIZE[0], device="cuda")
-        _ = model(x)
-        torch.cuda.synchronize()
-        t1 = time.perf_counter()
-        samples["half_cycle"].append((t1 - t0) * 1000.0)
+        # half_cycle: in-memory ndarray -> preprocess -> inference (stops at img emb).
+        # The .copy() simulates production receiving a fresh frame each tick.
+        def _half():
+            batches = [b.copy() for b in in_mem]
+            x = service._preprocess_stage(batches, user_params)
+            return service._inference_stage(x)
+        _, dt = time_call(_half)
+        samples["half_cycle"].append(dt * 1000.0)
 
-        # inference: preprocessed CUDA tensor -> inference
-        t0 = time.perf_counter()
-        _ = model(preprocessed)
-        torch.cuda.synchronize()
-        t1 = time.perf_counter()
-        samples["inference"].append((t1 - t0) * 1000.0)
+        # inference: preprocessed CUDA tensor -> inference (stops at img emb).
+        _, dt = time_call(lambda: service._inference_stage(preprocessed))
+        samples["inference"].append(dt * 1000.0)
 
-        # GPU temp sampled AFTER the three timed stages so the nvidia-smi
-        # subprocess overhead doesn't pollute the timing.
         per_iter_temp.append(query_gpu_temp_c())
 
     t_end = query_gpu_temp_c()
@@ -166,7 +198,6 @@ def benchmark(
         f"{k}_imgs_per_s": round(batch_size * 1000.0 / stage_stats[k]["mean_ms"], 2)
         for k in samples
     }
-
     iterations = {
         "iter": list(range(measure_iters)),
         "full_cycle_ms": [round(v, 3) for v in samples["full_cycle"]],
@@ -190,16 +221,19 @@ def benchmark(
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="PE-Core TRT speed benchmark")
+    p = argparse.ArgumentParser(
+        description="PE TRT speed benchmark (via PEService._detect stages)"
+    )
     p.add_argument("--engine", type=Path, default=DEFAULT_ENGINE,
                    help="TensorRT engine path (.trt / .engine)")
+    p.add_argument("--text-features", type=Path, default=DEFAULT_TXT,
+                   help="Path to text_features.json from PIA-SPACE-LAB/PE-Core-L14-336")
     p.add_argument("--image", type=Path, default=DEFAULT_IMAGE)
     p.add_argument("--batch", type=int, default=8)
     p.add_argument("--warmup", type=int, default=5)
     p.add_argument("--iters", type=int, default=25)
     p.add_argument("--out-dir", type=Path, default=DEFAULT_RESULTS_DIR)
-    p.add_argument("--tag", type=str, default="",
-                   help="Optional suffix appended to the output filename")
+    p.add_argument("--tag", type=str, default="")
     return p.parse_args()
 
 
@@ -208,17 +242,22 @@ def main() -> int:
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
-
     if args.engine.suffix not in (".trt", ".engine"):
         raise ValueError(
             f"engine must be .trt or .engine, got {args.engine.suffix}: {args.engine}"
+        )
+    if not args.text_features.exists():
+        raise FileNotFoundError(
+            f"text_features.json not found at {args.text_features} "
+            f"(download from PIA-SPACE-LAB/PE-Core-L14-336)"
         )
 
     initial_time = datetime.now()
     info = gpu_info()
 
-    print(f"model:  PE (perception_encoder)")
+    print(f"model:  PE (perception_encoder)  via PEService._detect")
     print(f"engine: {args.engine}")
+    print(f"txtfts: {args.text_features}")
     print(f"image:  {args.image}")
     print(f"gpu:    {info['name']}  (sm {info['compute_capability']}, "
           f"{info['total_memory_mib']} MiB)")
@@ -226,7 +265,6 @@ def main() -> int:
     print(f"start:  {initial_time.isoformat(timespec='seconds')}")
 
     result = benchmark(
-        engine_path=args.engine,
         image_path=args.image,
         batch_size=args.batch,
         warmup_iters=args.warmup,
@@ -235,11 +273,13 @@ def main() -> int:
 
     payload = {
         "model": "PE-Core-L14-336",
+        "code_path": "PEService._detect (split stages)",
         "initial_time": initial_time.isoformat(timespec="seconds"),
         "gpu_type": info["name"],
         "gpu": info,
         "batch_size": args.batch,
         "engine_path": str(args.engine),
+        "text_features_path": str(args.text_features),
         "image_path": str(args.image),
         "input_size": [3, *IMG_SIZE],
         "warmup_iters": args.warmup,

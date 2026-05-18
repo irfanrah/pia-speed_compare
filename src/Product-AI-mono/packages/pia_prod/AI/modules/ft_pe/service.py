@@ -137,14 +137,32 @@ class FTPEService(ServiceBase):
         stream_ids = datas["stream_ids"]
         user_params = datas["user_params"]
 
+        processed_batches = self._preprocess_stage(batches, user_params)
+        return self._postprocess_stage(
+            processed_batches, batches, stream_ids, user_params
+        )
+
+    def _preprocess_stage(self, batches, user_params):
         if not self.is_torch_batches(batches, speed_mode=True):
             cv_bgr2rgb_batch(batches)
-
         cropped_batches = self.roi_manager.process_batches_with_roi(batches, user_params)
-        processed_batches = preprocess_image(
+        return preprocess_image(
             cropped_batches, size=self.image_size[0], device=DEVICE
         )  # [B, C, H, W]
 
+    def _inference_stage(self, encode_input):
+        """Run the temporal model on a (B_enc, W, C, H, W) tensor.
+
+        Used standalone for speed benchmarking; the real per-tick flow in
+        ``_postprocess_stage`` only calls the model when each stream's
+        sliding window fills.
+        """
+        with torch.inference_mode():
+            embeddings = self.model(encode_input)
+            embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
+        return embeddings
+
+    def _postprocess_stage(self, processed_batches, batches, stream_ids, user_params):
         for stream_id, batch in zip(stream_ids, processed_batches):
             self.gather_frame_buffers[stream_id].append(batch)
             self._unconsumed_frames[stream_id] += 1
@@ -162,9 +180,7 @@ class FTPEService(ServiceBase):
 
         if encode_stream_ids:
             encode_input = torch.stack(encode_tensors)  # [B_enc, W, C, H, W]
-            with torch.inference_mode():
-                embeddings = self.model(encode_input)  # [B_enc, W, 1024]
-                embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
+            embeddings = self._inference_stage(encode_input)  # [B_enc, W, 1024]
             for sid, emb in zip(encode_stream_ids, embeddings):
                 # 최근 PREDICTION_SIZE 임베딩만 프레임 버퍼에 투입
                 new_embs = emb[-self.prediction_size:]
