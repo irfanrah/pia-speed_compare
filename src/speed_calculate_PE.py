@@ -44,7 +44,7 @@ from PIL import Image
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src" / "Product-AI-mono" / "packages"))
 
-DEFAULT_ENGINE = REPO_ROOT / "assets" / "model" / "PE-Core-L14-336_vision_dynamic.engine"
+DEFAULT_ENGINE = REPO_ROOT / "assets" / "model" / "PE-Core-L14-336.engine"
 DEFAULT_TXT = REPO_ROOT / "assets" / "model" / "text_features.json"
 DEFAULT_IMAGE = REPO_ROOT / "assets" / "images" / "kkpolice_1.jpg"
 DEFAULT_RESULTS_DIR = REPO_ROOT / "results"

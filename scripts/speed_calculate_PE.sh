@@ -16,9 +16,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 PE_HF_REPO=${PE_HF_REPO:-PIA-SPACE-LAB/PE-Core-L14-336}
-PE_HF_FILE=${PE_HF_FILE:-onnx/PE-Core-L14-336_vision_dynamic.onnx}
-PE_ONNX=${PE_ONNX:-assets/model/PE-Core-L14-336_vision_dynamic.onnx}
-PE_ENGINE=${PE_ENGINE:-assets/model/PE-Core-L14-336_vision_dynamic.engine}
+PE_HF_FILE=${PE_HF_FILE:-PE-Core-L14-336.onnx}
+PE_ONNX=${PE_ONNX:-assets/model/PE-Core-L14-336.onnx}
+PE_ENGINE=${PE_ENGINE:-assets/model/PE-Core-L14-336.engine}
 PE_TEXT_FEATURES=${PE_TEXT_FEATURES:-assets/model/text_features.json}
 
 BATCH=${BATCH:-8}

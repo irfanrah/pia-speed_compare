@@ -33,10 +33,10 @@ from src.preprocess import load_image, preprocess
 # ──────────────────────────────── config ────────────────────────────────
 
 HF_REPO_ID = "PIA-SPACE-LAB/PE-Core-L14-336"
-HF_ONNX_FILENAME = "onnx/PE-Core-L14-336_vision_dynamic.onnx"
+HF_ONNX_FILENAME = "PE-Core-L14-336.onnx"
 
-ONNX_PATH = "assets/model/PE-Core-L14-336_vision_dynamic.onnx"
-ENGINE_PATH = "assets/model/PE-Core-L14-336_vision_dynamic.engine"
+ONNX_PATH = "assets/model/PE-Core-L14-336.onnx"
+ENGINE_PATH = "assets/model/PE-Core-L14-336.engine"
 SAMPLE_IMAGE = "assets/images/dog.jpg"
 RESULTS_JSON = "results/pe_check_perception_encoder.json"
 
