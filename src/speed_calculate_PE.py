@@ -2,14 +2,25 @@
 
 Instantiates ``pia_prod.AI.modules.perception_encoder.service.PEService`` and
 times the three split stages exposed in ``_detect`` -- the same code path
-production runs:
+production runs.
+
+Stage boundary convention (shared with the FT_PE bench):
+    * ``half_cycle`` is the **video-side** pipeline -- everything up to and
+      including the latest per-stream **video embedding** ``(B, 1024)``. PE
+      has no temporal model and ``TEMPORAL_SIZE = 1``, so the per-stream
+      video embedding is the per-image visual vector itself.
+    * The moment any text-side work runs (text embeddings, cos-sim against
+      text features, top-K, alarm event manager), the timing is no longer
+      ``half_cycle`` -- that work lives only in ``full_cycle``.
 
     full_cycle:  disk read -> _preprocess_stage -> _inference_stage
-                 -> _postprocess_stage   (end-to-end: includes cos sim + alarm)
+                 -> _postprocess_stage
+                 (end-to-end: deque append -> cos sim vs text features
+                  -> top-K -> duration-queue alarm)
     half_cycle:  in-memory ndarray -> _preprocess_stage -> _inference_stage
-                                                          (stops at img emb)
+                 (stops at video emb (B, 1024); no text-side work)
     inference:   already-preprocessed CUDA tensor -> _inference_stage
-                                                          (stops at img emb)
+                 (stops at visual emb (B, 1024); no preprocess, no text)
 
 GPU temperature is polled per iter via NVML when ``pynvml`` is installed,
 falling back to nvidia-smi otherwise.
@@ -114,11 +125,22 @@ def stats(samples_ms: list[float]) -> dict:
 
 
 def make_user_params(batch_size: int) -> list[dict]:
-    """Minimal user_param payloads required by PERoIManager + PEEventManager.
-    No retEvent matches roi_category_list, so ROI defaults to the whole frame."""
+    """user_param payloads for PERoIManager + PEEventManager with fire / falldown
+    / smoke retEvents enabled.
+
+    Shape mirrors what ``AddStreamModel2dict`` produces in production: retEvent
+    is a dict keyed by category id, each value carrying a ``roi`` with empty
+    ``polygonCoordinates`` so the PE ROI manager falls back to the whole frame.
+    Falldown is included on purpose -- it's the only key in
+    ``PERoIManager.roi_category_list``, so this exercises the dict-shape ROI
+    lookup path that production hits."""
     return [
         {"user_param": {
-            "retEvent": ["fire_ret"],
+            "retEvent": {
+                "fire_ret":     {"roi": {"polygonCoordinates": []}},
+                "falldown_ret": {"roi": {"polygonCoordinates": []}},
+                "smoke_ret":    {"roi": {"polygonCoordinates": []}},
+            },
             "cameraId": f"cam_{i}",
             "organization": "pia",
         }}
@@ -146,14 +168,20 @@ def benchmark(
     def fresh_batches() -> list[np.ndarray]:
         return [template.copy() for _ in range(batch_size)]
 
+    stream_ids = [f"stream_{i}" for i in range(batch_size)]
+
     # One preprocessed CUDA tensor reused across iters for the inference-only
     # stage.
     preprocessed = service._preprocess_stage(fresh_batches(), user_params)
 
-    # Warmup.
+    # Warmup covers the full _detect chain so the first measured full_cycle
+    # iter doesn't pay the postprocess (cos-sim + top-K + alarm event manager)
+    # cold-cache hit.
     for _ in range(warmup_iters):
-        x = service._preprocess_stage(fresh_batches(), user_params)
-        _ = service._inference_stage(x)
+        batches = fresh_batches()
+        x = service._preprocess_stage(batches, user_params)
+        v = service._inference_stage(x)
+        _ = service._postprocess_stage(v, batches, stream_ids, user_params)
     torch.cuda.synchronize()
 
     samples = {"full_cycle": [], "half_cycle": [], "inference": []}
@@ -161,8 +189,6 @@ def benchmark(
     t_start = query_gpu_temp_c()
 
     in_mem = fresh_batches()  # the "ndarray already in RAM" baseline buffer
-
-    stream_ids = [f"stream_{i}" for i in range(batch_size)]
 
     for _ in range(measure_iters):
         # full_cycle: disk read -> preprocess -> inference -> postprocess.

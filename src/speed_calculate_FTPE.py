@@ -1,16 +1,37 @@
 """Speed benchmark for ft_pe via the real FTPEService pipeline.
 
 Instantiates ``pia_prod.AI.modules.ft_pe.service.FTPEService`` and times the
-three split stages exposed in ``_detect``:
+three split stages exposed in ``_detect``.
+
+Stage boundary convention (shared with the PE bench):
+    * ``half_cycle`` is the **video-side** pipeline -- everything up to and
+      including the latest per-stream **video embedding** ``(B, 1024)``.
+      For FT_PE that means: preprocess + temporal encode + per-stream
+      mean-pool over a TEMPORAL_SIZE buffer.
+    * The moment any text-side work runs (text embeddings, cos-sim against
+      per-class text features, alarm event manager), the timing is no longer
+      ``half_cycle`` -- that work lives only in ``full_cycle``.
 
     full_cycle:  disk read -> _preprocess_stage -> _postprocess_stage
-                 (end-to-end per-tick production cycle: includes sliding-
-                 window encode + cos sim + alarm)
+                 (end-to-end per-tick production cycle: sliding-window
+                  encode + mean-pool + per-class cos sim vs text features
+                  + alarm event manager)
     half_cycle:  in-memory ndarrays for B*T frames -> _preprocess_stage
-                 -> _inference_stage(reshape (B*T,C,H,W) -> (B,T,C,H,W))
-                 (synthetic bulk run, stops at img emb)
+                 (cv_bgr2rgb_batch + ROI + preprocess_image)
+                 -> reshape (B*T,C,H,W) -> (B,T,C,H,W) -> _inference_stage
+                 -> per-stream mean-pool over a TEMPORAL_SIZE buffer
+                 (synthetic bulk run, stops at video_emb (B, 1024); no
+                  text-side work)
     inference:   already-preprocessed CUDA tensor (B,T,C,H,W)
-                 -> _inference_stage   (stops at img emb)
+                 -> _inference_stage
+                 (stops at per-frame img emb (B, T, 1024); no preprocess,
+                  no mean-pool, no text)
+
+Throughput for all three stages is reported in **frames encoded per second**
+(``*_imgs_per_s = B * T * 1000 / mean_ms``). For full_cycle this works because
+the bench forces stride=1, so each tick re-encodes a full (B, T) window. The
+production input rate (streams per second, i.e. unique frames ingested per
+tick) is reported separately as ``throughput.full_cycle_streams_per_s``.
 
 The full_cycle warms up FTPEService's temporal buffer for ``TEMPORAL_SIZE +
 window_size`` ticks before the timed loop so every measured iter produces a
@@ -66,7 +87,6 @@ from pia.ai.tasks.T2VRet.models.PE.utils.complexity_check import (  # noqa: E402
 )
 from pia_prod.AI.modules.ft_pe.service import FTPEService  # noqa: E402
 from pia_prod.AI.modules.ft_pe.config import IMG_SIZE, TEMPORAL_SIZE  # noqa: E402
-from pia_prod.AI.modules.perception_encoder.trt_utils import preprocess_image  # noqa: E402
 
 
 def query_gpu_temp_c(device_index: int = 0) -> float | None:
@@ -122,17 +142,25 @@ def stats(samples_ms: list[float]) -> dict:
     }
 
 
-def make_user_params(batch_size: int) -> list[dict]:
-    """retEvent uses a non-matching key so the ROI manager defaults to the
-    whole frame (FTPERoIManager treats every ALL_CATEGORIES name as ROI-bearing
-    and requires a dict shape — we want to avoid that path)."""
+def make_user_params(count: int, cam_prefix: str = "cam") -> list[dict]:
+    """user_param payloads with fire / falldown / smoke FT_PE retEvents on.
+
+    Shape mirrors what ``AddStreamModel2dict`` produces in production: retEvent
+    is a dict keyed by category id, each value carrying a ``roi`` with empty
+    ``polygonCoordinates`` so FTPERoIManager (whose ``roi_category_list`` is
+    ``ALL_CATEGORIES``) takes the dict-lookup path AND falls back to a whole-
+    frame ROI."""
     return [
         {"user_param": {
-            "retEvent": ["speed_test_ret"],
-            "cameraId": f"cam_{i}",
+            "retEvent": {
+                "fire_ft_ret":     {"roi": {"polygonCoordinates": []}},
+                "falldown_ft_ret": {"roi": {"polygonCoordinates": []}},
+                "smoke_ft_ret":    {"roi": {"polygonCoordinates": []}},
+            },
+            "cameraId": f"{cam_prefix}_{i}",
             "organization": "pia",
         }}
-        for i in range(batch_size)
+        for i in range(count)
     ]
 
 
@@ -178,19 +206,40 @@ def benchmark(
 
     stream_ids = [f"stream_{i}" for i in range(batch_size)]
     user_params = make_user_params(batch_size)
+    # Separate user_params for the synthetic B*T bulk path so _preprocess_stage
+    # accepts a 1-to-1 (frame, user_param) pairing.
+    bulk_user_params = make_user_params(batch_size * frames, cam_prefix="bulk")
     template = load_image_ndarray(image_path)
 
     def fresh_batches() -> list[np.ndarray]:
         return [template.copy() for _ in range(batch_size)]
 
+    def fresh_bulk_batches() -> list[np.ndarray]:
+        return [template.copy() for _ in range(batch_size * frames)]
+
     # --- Build a preprocessed (B, T, C, H, W) tensor for the inference-only
     # stage (synthetic flow that bypasses the per-stream buffer).
     # Engine I/O is FP32 (see engine inspection) -- do NOT cast to .half().
-    bulk = [template.copy() for _ in range(batch_size * frames)]
-    bulk_cuda = preprocess_image(bulk, size=IMG_SIZE[0], device="cuda")
+    bulk_cuda = service._preprocess_stage(fresh_bulk_batches(), bulk_user_params)
     preprocessed_bt = bulk_cuda.view(
         batch_size, frames, *bulk_cuda.shape[1:]
     ).contiguous()
+
+    # --- Per-stream synthetic prior-tick history for the half_cycle's
+    # mean-pool step. Production fills each stream's frame_buffer over many
+    # ticks (TEMPORAL_SIZE entries, one per tick at prediction_size=1). Here
+    # the timed loop only runs one tick of inference per iter, so we pre-fill
+    # (TEMPORAL_SIZE - prediction_size) older slots once -- the timed region
+    # only pays the per-tick stack + mean cost, matching what
+    # ``_postprocess_stage`` does per tick once the buffer is full.
+    _prefill_embs = service._inference_stage(preprocessed_bt)        # (B, T, 1024)
+    _hist_slot = _prefill_embs[:, -1:, :]                            # (B, 1, 1024)
+    _hist_len = TEMPORAL_SIZE - service.prediction_size
+    _hist = _hist_slot.expand(-1, _hist_len, -1).contiguous()        # (B, hist_len, 1024)
+    prefilled_bufs: list[list[torch.Tensor]] = [
+        list(_hist[i].unbind(0)) for i in range(batch_size)
+    ]
+    pred_k = service.prediction_size
 
     # --- Prime the FTPEService temporal buffer so each measured full_cycle
     # tick actually produces a prediction.
@@ -200,19 +249,23 @@ def benchmark(
             batches=fresh_batches(), stream_ids=stream_ids, user_params=user_params,
         )
 
-    # Additional warmup for cache/JIT.
+    # Additional warmup for cache/JIT. Cover all three measured paths.
     for _ in range(warmup_iters):
         service._detect(
             batches=fresh_batches(), stream_ids=stream_ids, user_params=user_params,
         )
-        _ = service._inference_stage(preprocessed_bt)
+        _ = service._preprocess_stage(fresh_bulk_batches(), bulk_user_params)
+        emb_w = service._inference_stage(preprocessed_bt)
+        new_w = emb_w[:, -pred_k:, :]
+        for i in range(batch_size):
+            _ = torch.stack(prefilled_bufs[i] + list(new_w[i].unbind(0))).mean(dim=0)
     torch.cuda.synchronize()
 
     samples = {"full_cycle": [], "half_cycle": [], "inference": []}
     per_iter_temp: list[float | None] = []
     t_start = query_gpu_temp_c()
 
-    in_mem_bulk = [template.copy() for _ in range(batch_size * frames)]
+    in_mem_bulk = fresh_bulk_batches()
 
     for _ in range(measure_iters):
         # full_cycle: disk read -> _detect (preprocess + buffer + encode +
@@ -225,14 +278,25 @@ def benchmark(
         _, dt = time_call(_full)
         samples["full_cycle"].append(dt * 1000.0)
 
-        # half_cycle: in-memory B*T frames -> preprocess -> inference (stops
-        # at img emb). Synthetic bulk path -- not the production per-tick
-        # buffer flow.
+        # half_cycle: in-memory B*T frames -> _preprocess_stage (cv_bgr2rgb +
+        # ROI + preprocess_image) -> _inference_stage (B,T,1024) -> per-stream
+        # mean-pool over a TEMPORAL_SIZE buffer = (B, 1024) video embeddings.
+        # The (TEMPORAL_SIZE - prediction_size) older buffer slots are pre-
+        # filled outside the timed region; the timed iter just appends this
+        # tick's last `prediction_size` rows and stacks+means per stream,
+        # matching the per-tick cost ``_postprocess_stage`` pays once the
+        # buffer is full.
         def _half():
             bulk_now = [b.copy() for b in in_mem_bulk]
-            x = preprocess_image(bulk_now, size=IMG_SIZE[0], device="cuda")
+            x = service._preprocess_stage(bulk_now, bulk_user_params)
             x = x.view(batch_size, frames, *x.shape[1:]).contiguous()
-            return service._inference_stage(x)
+            emb = service._inference_stage(x)                  # (B, T, 1024)
+            new_per_stream = emb[:, -pred_k:, :]               # (B, K, 1024)
+            video_embs = []
+            for i in range(batch_size):
+                buf = prefilled_bufs[i] + list(new_per_stream[i].unbind(0))
+                video_embs.append(torch.stack(buf).mean(dim=0))
+            return torch.stack(video_embs)                     # (B, 1024)
         _, dt = time_call(_half)
         samples["half_cycle"].append(dt * 1000.0)
 
@@ -246,14 +310,18 @@ def benchmark(
     temps = [t for t in per_iter_temp if t is not None]
 
     stage_stats = {k: stats(v) for k, v in samples.items()}
+    # Unit: frames encoded per second.
+    #   - half_cycle / inference: encode (B*T) frames per call.
+    #   - full_cycle: stride=1 with window_size=T means each tick re-encodes
+    #     a (B, T) window, i.e. B*T frames per tick.
+    # So all three stages share the same work unit and are directly comparable.
+    # Production input rate is reported separately as `full_cycle_streams_per_s`.
     total_frames = batch_size * frames
     throughput = {
         f"{k}_imgs_per_s": round(total_frames * 1000.0 / stage_stats[k]["mean_ms"], 2)
         for k in samples
     }
-    # full_cycle processes 1 frame per stream per tick, so it has a different
-    # work unit -- override its throughput to reflect that.
-    throughput["full_cycle_imgs_per_s"] = round(
+    throughput["full_cycle_streams_per_s"] = round(
         batch_size * 1000.0 / stage_stats["full_cycle"]["mean_ms"], 2
     )
 
