@@ -3,7 +3,7 @@
 For every ``results/*.json`` written by ``speed_calculate_PE.py`` or
 ``speed_calculate_FTPE.py``, write a ``<same_name>.png`` next to it.
 
-Left Y axis  : full_cycle, half_cycle, inference (ms)
+Left Y axis  : full_cycle, three_quarters_cycle, half_cycle, inference (ms)
 Right Y axis : GPU temperature (deg C)
 X axis       : iteration index
 """
@@ -30,14 +30,17 @@ def plot_one(payload: dict, out_path: Path) -> None:
 
     x = it["iter"]
     full = it.get("full_cycle_ms", [])
+    tqc  = it.get("three_quarters_cycle_ms", [])
     half = it.get("half_cycle_ms", [])
-    inf = it.get("inference_ms", [])
+    inf  = it.get("inference_ms", [])
     temp = it.get("gpu_temp_c", [])
 
     fig, ax_l = plt.subplots(figsize=(10, 5))
-    ax_l.plot(x, full, marker="o", markersize=3, label="full_cycle",  color="#1f77b4")
-    ax_l.plot(x, half, marker="s", markersize=3, label="half_cycle",  color="#2ca02c")
-    ax_l.plot(x, inf,  marker="^", markersize=3, label="inference",   color="#ff7f0e")
+    ax_l.plot(x, full, marker="o", markersize=3, label="full_cycle",            color="#1f77b4")
+    if tqc:
+        ax_l.plot(x, tqc, marker="D", markersize=3, label="three_quarters_cycle", color="#9467bd")
+    ax_l.plot(x, half, marker="s", markersize=3, label="half_cycle",            color="#2ca02c")
+    ax_l.plot(x, inf,  marker="^", markersize=3, label="inference",             color="#ff7f0e")
     ax_l.set_xlabel("iter")
     ax_l.set_ylabel("latency (ms)")
     ax_l.grid(True, alpha=0.3)

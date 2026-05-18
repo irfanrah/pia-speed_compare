@@ -1,7 +1,7 @@
 """Speed benchmark for ft_pe via the real FTPEService pipeline.
 
-Instantiates ``pia_prod.AI.modules.ft_pe.service.FTPEService`` and times the
-three split stages exposed in ``_detect``.
+Instantiates ``pia_prod.AI.modules.ft_pe.service.FTPEService`` and times
+four split stages exposed in ``_detect``.
 
 Stage boundary convention (shared with the PE bench):
     * ``half_cycle`` = **one production tick of the vision side**: disk read
@@ -9,34 +9,41 @@ Stage boundary convention (shared with the PE bench):
       + per-stream mean-pool -> video embedding ``(B, 1024)``.
     * ``full_cycle`` = same tick **plus** the text side: L2 norm + per-class
       cos-sim against text features + alarm event manager.
-    * So ``half_cycle <= full_cycle`` by construction -- the only difference
-      between the two timings is the text-side cost.
+    * ``three_quarters_cycle`` = ``full_cycle`` minus the disk read; frames
+      already in RAM (e.g. handed in by a camera/grabber buffer) when the
+      timed call starts.
+    * So ``half_cycle <= full_cycle`` by construction (only the text side
+      differs); ``three_quarters_cycle <= full_cycle`` likewise (only the
+      disk read differs).
 
-    full_cycle:  disk read -> _preprocess_stage -> _postprocess_stage
-                 (end-to-end per-tick production cycle: gather buffer +
-                  sliding-window encode + frame buffer + mean-pool +
-                  L2 norm + per-class cos sim + alarm event manager)
-    half_cycle:  disk read -> _preprocess_stage(B)
-                 -> (gather buffer + model + frame buffer + per-stream
-                  mean-pool, reusing service state)
-                 (stops at video_emb (B, 1024); no text-side work)
-    inference:   already-preprocessed CUDA tensor (B,T,C,H,W)
-                 -> _inference_stage
-                 (stops at per-frame img emb (B, T, 1024); no preprocess,
-                  no mean-pool, no text)
+    full_cycle:            disk read -> _preprocess_stage -> _postprocess_stage
+                           (end-to-end per-tick production cycle: gather
+                            buffer + sliding-window encode + frame buffer
+                            + mean-pool + L2 norm + per-class cos sim +
+                            alarm event manager)
+    three_quarters_cycle:  in-memory ndarray -> _preprocess_stage
+                           -> _postprocess_stage
+                           (full_cycle minus disk read)
+    half_cycle:            disk read -> _preprocess_stage(B)
+                           -> (gather buffer + model + frame buffer +
+                            per-stream mean-pool, reusing service state)
+                           (stops at video_emb (B, 1024); no text-side work)
+    inference:             already-preprocessed CUDA tensor (B,T,C,H,W)
+                           -> _inference_stage
+                           (stops at per-frame img emb (B, T, 1024); no
+                            preprocess, no mean-pool, no text)
 
-half_cycle reuses ``service.gather_frame_buffers`` and
-``service.frame_buffers``, so each call advances the per-stream state by
-exactly one tick -- the same advance ``_detect`` causes for full_cycle.
-The timed loop alternates full / half / inference within each iter; full
-and half each advance the state, inference does not.
+half_cycle and three_quarters_cycle both reuse
+``service.gather_frame_buffers`` and ``service.frame_buffers``, so each
+call advances the per-stream state by exactly one tick -- the same advance
+``_detect`` causes for full_cycle. The timed loop runs full / three-quarters
+/ half / inference within each iter; the first three each advance the state
+once, inference does not (the buffer stays full across all advances).
 
-Throughput for all three stages is reported in **frames encoded per second**
-(``*_imgs_per_s = B * T * 1000 / mean_ms``). For full_cycle and half_cycle
-this works because the bench forces stride=1, so each tick re-encodes a full
-(B, T) window. Production input rate (streams per second, i.e. unique frames
-ingested per tick) is also reported as ``throughput.full_cycle_streams_per_s``
-and ``throughput.half_cycle_streams_per_s``.
+Throughput is reported in **frames encoded per second**
+(``*_imgs_per_s = B * T * 1000 / mean_ms``). Production input rate (streams
+per second, i.e. unique frames ingested per tick) is also reported for the
+three tick-based stages as ``throughput.<stage>_streams_per_s``.
 
 The full_cycle warms up FTPEService's temporal buffer for ``TEMPORAL_SIZE +
 window_size`` ticks before the timed loop so every measured iter produces a
@@ -287,9 +294,16 @@ def benchmark(
         _ = service._inference_stage(preprocessed_bt)
     torch.cuda.synchronize()
 
-    samples = {"full_cycle": [], "half_cycle": [], "inference": []}
+    samples = {
+        "full_cycle": [],
+        "three_quarters_cycle": [],
+        "half_cycle": [],
+        "inference": [],
+    }
     per_iter_temp: list[float | None] = []
     t_start = query_gpu_temp_c()
+
+    in_mem = fresh_batches()  # "ndarray already in RAM" baseline for three_quarters
 
     for _ in range(measure_iters):
         # full_cycle: one production tick. disk read -> _detect (preprocess
@@ -303,6 +317,16 @@ def benchmark(
             )
         _, dt = time_call(_full)
         samples["full_cycle"].append(dt * 1000.0)
+
+        # three_quarters_cycle: same tick as full_cycle MINUS the disk read.
+        # Frames already in RAM (e.g. handed in by a camera/grabber buffer).
+        def _three_quarters():
+            batches = [b.copy() for b in in_mem]
+            return service._detect(
+                batches=batches, stream_ids=stream_ids, user_params=user_params,
+            )
+        _, dt = time_call(_three_quarters)
+        samples["three_quarters_cycle"].append(dt * 1000.0)
 
         # half_cycle: same tick as full_cycle MINUS the text-side work.
         # disk read -> _preprocess_stage(B) -> postprocess up to per-stream
@@ -327,29 +351,28 @@ def benchmark(
 
     stage_stats = {k: stats(v) for k, v in samples.items()}
     # Unit: frames encoded per second (B*T per tick / per call).
-    #   - full_cycle and half_cycle: stride=1 with window_size=T means each
-    #     tick re-encodes a (B, T) window, i.e. B*T frames per tick.
+    #   - full / three_quarters / half_cycle: stride=1 with window_size=T
+    #     means each tick re-encodes a (B, T) window = B*T frames per tick.
     #   - inference: one call encodes a (B, T) tensor, i.e. B*T frames.
-    # All three are directly comparable. Per-tick *input* rate (production
+    # All four are directly comparable. Per-tick *input* rate (production
     # streams per second) is reported separately for the tick-based stages.
     total_frames = batch_size * frames
     throughput = {
         f"{k}_imgs_per_s": round(total_frames * 1000.0 / stage_stats[k]["mean_ms"], 2)
         for k in samples
     }
-    throughput["full_cycle_streams_per_s"] = round(
-        batch_size * 1000.0 / stage_stats["full_cycle"]["mean_ms"], 2
-    )
-    throughput["half_cycle_streams_per_s"] = round(
-        batch_size * 1000.0 / stage_stats["half_cycle"]["mean_ms"], 2
-    )
+    for k in ("full_cycle", "three_quarters_cycle", "half_cycle"):
+        throughput[f"{k}_streams_per_s"] = round(
+            batch_size * 1000.0 / stage_stats[k]["mean_ms"], 2
+        )
 
     iterations = {
         "iter": list(range(measure_iters)),
-        "full_cycle_ms": [round(v, 3) for v in samples["full_cycle"]],
-        "half_cycle_ms": [round(v, 3) for v in samples["half_cycle"]],
-        "inference_ms":  [round(v, 3) for v in samples["inference"]],
-        "gpu_temp_c":    [round(t, 1) if t is not None else None for t in per_iter_temp],
+        "full_cycle_ms":           [round(v, 3) for v in samples["full_cycle"]],
+        "three_quarters_cycle_ms": [round(v, 3) for v in samples["three_quarters_cycle"]],
+        "half_cycle_ms":           [round(v, 3) for v in samples["half_cycle"]],
+        "inference_ms":            [round(v, 3) for v in samples["inference"]],
+        "gpu_temp_c":              [round(t, 1) if t is not None else None for t in per_iter_temp],
     }
 
     return {

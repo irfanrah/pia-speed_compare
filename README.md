@@ -15,19 +15,26 @@ scripts/plot_results.sh           → src/plot_results.py        (results/*.json
 
 ## Stage convention
 
-Each script reports three stages per run. The dividing principle is **video
-side vs text side**:
+Each script reports four stages per run. The dividing principle is **video
+side vs text side**, with `three_quarters_cycle` factoring out the disk-read
+cost:
 
-| Stage | Scope | Output | Includes text-side work? |
-|---|---|---|---|
-| `inference` | pure encoder model compute on a pre-cooked CUDA tensor | per-frame img emb | no |
-| `half_cycle` | everything **up to the latest video embedding** | video emb `(B, 1024)` | **no** |
-| `full_cycle` | one end-to-end production tick | alarm decision | yes |
+| Stage | Scope | Output | Disk read? | Text side? |
+|---|---|---|---|---|
+| `inference` | pure encoder model compute on a pre-cooked CUDA tensor | per-frame img emb | no | no |
+| `half_cycle` | everything **up to the latest video embedding** | video emb `(B, 1024)` | yes | **no** |
+| `three_quarters_cycle` | one production tick **minus disk read** | alarm decision | **no** | yes |
+| `full_cycle` | one end-to-end production tick | alarm decision | yes | yes |
 
 The rule of thumb: **the moment any text embedding (cos-sim vs text features,
 top-K, alarm event manager) is involved, the timing is no longer `half_cycle`
-— it's `full_cycle`.** This boundary is what makes the PE and FT_PE
-half_cycle numbers semantically comparable.
+— it's `full_cycle` / `three_quarters_cycle`.** This boundary is what makes
+the PE and FT_PE half_cycle numbers semantically comparable.
+
+`three_quarters_cycle` answers "how fast is one production tick when frames
+are already in RAM" (e.g. an RTSP grabber hands you decoded ndarrays, no
+local disk I/O). `full_cycle - three_quarters_cycle` is therefore the
+isolated disk-read cost.
 
 ### What "video embedding" means in each pipeline
 
@@ -63,12 +70,15 @@ Concretely, `_postprocess_stage` does two things in sequence per tick:
 ### PE (`src/speed_calculate_PE.py`)
 
 ```
-full_cycle : disk read → cv_bgr2rgb + ROI + preprocess_image
-                       → TRT model           → (B, 1024)
-                       → deque append → cos-sim vs text → top-K → alarm
-half_cycle : in-mem ndarray → cv_bgr2rgb + ROI + preprocess_image
-                            → TRT model      → (B, 1024)                ← stops here
-inference  : pre-cooked (B, 3, H, W) tensor → TRT model → (B, 1024)
+full_cycle           : disk read     → cv_bgr2rgb + ROI + preprocess_image
+                                     → TRT model        → (B, 1024)
+                                     → deque append → cos-sim vs text → top-K → alarm
+three_quarters_cycle : in-mem ndarray → cv_bgr2rgb + ROI + preprocess_image
+                                     → TRT model        → (B, 1024)
+                                     → deque append → cos-sim vs text → top-K → alarm
+half_cycle           : disk read     → cv_bgr2rgb + ROI + preprocess_image
+                                     → TRT model        → (B, 1024)                  ← stops here
+inference            : pre-cooked (B, 3, H, W) tensor → TRT model → (B, 1024)
 ```
 
 ### FT_PE (`src/speed_calculate_FTPE.py`)
@@ -78,25 +88,33 @@ inference  : pre-cooked (B, 3, H, W) tensor → TRT model → (B, 1024)
 triggers an encode.
 
 ```
-full_cycle : disk read → _preprocess_stage(B)
-                       → per-stream gather buffer (window_size=T)
-                       → TRT model                  → (B, T, 1024)
-                       → per-stream frame_buffer (TEMPORAL_SIZE=8)
-                       → mean-pool                  → (B, 1024)
-                       → L2 norm → per-class cos-sim → alarm
-half_cycle : disk read → _preprocess_stage(B)
-                       → per-stream gather buffer (window_size=T)
-                       → TRT model                  → (B, T, 1024)
-                       → per-stream frame_buffer (TEMPORAL_SIZE=8)
-                       → mean-pool                  → (B, 1024)         ← stops here
-inference  : pre-cooked (B, T, 3, H, W) tensor → TRT model → (B, T, 1024)
+full_cycle           : disk read     → _preprocess_stage(B)
+                                     → gather buffer (window_size=T)
+                                     → TRT model           → (B, T, 1024)
+                                     → frame_buffer (TEMPORAL_SIZE=8)
+                                     → mean-pool           → (B, 1024)
+                                     → L2 norm → per-class cos-sim → alarm
+three_quarters_cycle : in-mem ndarray → _preprocess_stage(B)
+                                     → gather buffer
+                                     → TRT model           → (B, T, 1024)
+                                     → frame_buffer
+                                     → mean-pool           → (B, 1024)
+                                     → L2 norm → per-class cos-sim → alarm
+half_cycle           : disk read     → _preprocess_stage(B)
+                                     → gather buffer
+                                     → TRT model           → (B, T, 1024)
+                                     → frame_buffer
+                                     → mean-pool           → (B, 1024)         ← stops here
+inference            : pre-cooked (B, T, 3, H, W) tensor → TRT model → (B, T, 1024)
 ```
 
-Both `full_cycle` and `half_cycle` are **one production tick** — they share
-the same `service.gather_frame_buffers` and `service.frame_buffers` state,
-which is primed once during warmup and advanced by one tick per timed call.
-The only difference between the two stages is the text-side block at the
-end of `full_cycle`, so `half_cycle <= full_cycle` holds **by construction**.
+`full_cycle`, `three_quarters_cycle`, and `half_cycle` are all **one
+production tick** — they share the same `service.gather_frame_buffers` and
+`service.frame_buffers` state, which is primed once during warmup and
+advanced by one tick per timed call. The differences between the three
+stages are only the disk-read step and/or the text-side block at the end,
+so `half_cycle <= full_cycle` and `three_quarters_cycle <= full_cycle` hold
+**by construction**.
 The earlier "synthetic B×T bulk preprocess" definition was scrapped: it
 inflated half_cycle's preprocess work T× relative to a real tick and produced
 the nonsensical `half > full` ordering at `T > 1`.
