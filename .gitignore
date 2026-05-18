@@ -16,9 +16,6 @@ assets/model/*.json
 
 # Benchmark runtime artifacts
 logs/
-results/*.json
-results/*.png
-results/summary.txt
 
 # OS
 .DS_Store
