@@ -1,0 +1,11 @@
+# khonkaen_peoplecounting -- Module-Specific Dependencies
+# Common deps are in ../requirements.txt.
+# (Pillow is already provided by torchvision in the base image)
+
+# -- JIT-compiled image processing ---------------------------------------------
+# Traced from: pia.vision.preprocessing.color -> numba (njit, prange)
+numba==0.61.2
+
+# -- ONNX runtime -------------------------------------------------------------
+# Traced from: model.py -> pia.ai.tasks.CP.models.clip_ebc.clip_ebc -> onnxruntime
+onnxruntime

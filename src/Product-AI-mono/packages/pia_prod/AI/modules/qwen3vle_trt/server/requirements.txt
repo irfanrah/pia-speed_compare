@@ -1,0 +1,19 @@
+fastapi==0.115.6
+uvicorn==0.34.0
+pydantic>=2,<3
+python-multipart==0.0.20
+
+# vision / preprocessing
+pillow>=10
+numpy>=1.26,<2
+
+# torch + transformers (matched to engine export environment)
+torch==2.9.1
+torchvision==0.24.1
+transformers==4.57.3
+
+# Qwen3-VL chat templating + vision_process helper imported by trt/model.py
+qwen-vl-utils[decord]==0.0.14
+
+# TensorRT runtime — must match the version used to compile the engines
+tensorrt==10.8.0.43

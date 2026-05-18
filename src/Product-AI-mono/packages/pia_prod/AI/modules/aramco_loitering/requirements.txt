@@ -1,0 +1,18 @@
+# aramco_loitering -- Module-Specific Dependencies
+# Common deps are in ../requirements.txt.
+
+# -- YOLO object detection -----------------------------------------------------
+ultralytics==8.3.227
+
+# -- TensorRT (onnx2trt in test fixture + .engine model loading) --------------
+tensorrt==10.8.0.43
+
+# -- JIT-compiled image processing ---------------------------------------------
+# Traced from: pia.vision.preprocessing.color -> numba (njit, prange)
+numba==0.61.2
+
+# -- OC-SORT tracker -----------------------------------------------------------
+# Traced from: aramco_loitering.service -> vanguard_patient.tracker ->
+# trackers.ocsort_tracker.kalmanfilter (provided by yolox @ OC_SORT)
+yolox @ git+https://github.com/noahcao/OC_SORT.git@7d06bffe98b5e57cc696ce56739554483c7e99ca
+filterpy

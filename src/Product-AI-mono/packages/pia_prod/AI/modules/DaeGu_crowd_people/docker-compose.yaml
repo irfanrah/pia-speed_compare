@@ -1,0 +1,25 @@
+services:
+  test-daegu-crowd-people:
+    build:
+      context: ../../../../..
+      dockerfile: packages/pia_prod/AI/modules/DaeGu_crowd_people/Dockerfile
+      args:
+        BASE_IMAGE: pia-test-base:latest
+    environment:
+      - TEAM=ai
+      - ENV=dev
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HF_NAMESPACE=${HF_NAMESPACE:-TeamPIA}
+      - HF_AUTH_TOKEN=${HF_AUTH_TOKEN:-}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ../../../../../assets/model:/workspace/assets/model:rw
+      - ../../../../../assets/videos:/workspace/assets/videos:rw
+    shm_size: '8g'
+    network_mode: host

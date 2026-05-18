@@ -1,0 +1,45 @@
+# =============================================================================
+# modules -- Common Python Dependencies (shared across all modules)
+# =============================================================================
+# Base image provides (DO NOT duplicate here):
+#   torch, torchvision, numpy, opencv-python, ultralytics
+#
+# This file covers dependencies used by the shared infrastructure:
+#   - pia_prod base classes (service_base.py, event_base.py)
+#   - pia_prod DTO (param_base.py, stream_params.py)
+#   - pia_prod utils (init.py, log_templates.py, output_handler.py)
+#   - embedded pia package utilities (logging, databases, api, vision)
+#   - pytest test runner and conftest.py fixtures
+#
+# Module-specific requirements.txt files inherit from this and add
+# only what each module needs on top (e.g. tensorrt, filterpy).
+# =============================================================================
+
+# -- DTO / data validation ----------------------------------------------------
+pydantic==2.10.3
+
+# -- Infrastructure: Redis, RabbitMQ, S3 --------------------------------------
+redis==5.2.1
+pika==1.3.2
+boto3
+retry==0.9.2
+
+# -- Configuration -------------------------------------------------------------
+python-dotenv==1.0.1
+
+# -- Logging -------------------------------------------------------------------
+rich==13.9.4
+concurrent_log_handler
+
+# -- HTTP / download -----------------------------------------------------------
+requests
+huggingface_hub
+
+# -- Timestamp -----------------------------------------------------------------
+pytz==2024.2
+
+# -- ROI geometry --------------------------------------------------------------
+shapely
+
+# -- Test runner ---------------------------------------------------------------
+pytest

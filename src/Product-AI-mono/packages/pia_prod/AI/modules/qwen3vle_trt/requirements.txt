@@ -1,0 +1,44 @@
+# =============================================================================
+# qwen3vle_trt -- Module-Specific Dependencies
+# =============================================================================
+# Common deps are in ../requirements.txt (installed first by Dockerfile).
+# This file lists ONLY what qwen3vle_trt needs on top of that.
+# =============================================================================
+
+# -- TensorRT runtime ---------------------------------------------------------
+# Traced from: trt/engine.py (VisionEngine, TransformerEngine), trt/model.py,
+#              export/c_export_onnx_to_trt.py. Must match the version used to
+#              compile the engines on the export host.
+tensorrt==10.8.0.43
+
+# -- ONNX -------------------------------------------------------------------
+# Traced from: export/a_export_to_onnx.py + export/c_export_onnx_to_trt.py
+# (consolidate_external_data uses onnx.load / onnx.save_model). The engine
+# build path called from the test fixture (export_to_trt) imports onnx at
+# module load time, so it must be present even when engines already exist.
+onnx
+
+# -- Transformers / Qwen3-VL --------------------------------------------------
+# Traced from: trt/model.py
+#   `from transformers.models.qwen3_vl.modeling_qwen3_vl import ...`
+#   processor / tokenizer load via Qwen3VLProcessor at TRT model init.
+# 4.57.3 is the version that produces deterministic outputs against the
+# baked engine — newer versions changed BFloat16/Half coercion behavior.
+transformers==4.57.3
+
+# -- Qwen3-VL chat templating -------------------------------------------------
+# Traced from: export/a_export_to_onnx.py (`process_vision_info`) and
+# pia.ai.tasks.T2VRet.models.qwen3_vl_embedding (Qwen3VLForEmbedding helpers).
+qwen-vl-utils
+
+# -- JIT-compiled image processing -------------------------------------------
+# Traced from: pia.vision.preprocessing.color -> numba (njit, prange).
+# Used by cv_bgr2rgb_batch in service.py._detect.
+numba==0.61.2
+
+# -- HTTP client (server-mode tests) -----------------------------------------
+# Traced from: tests/modules/test_qwen3vle_trt.py — server-level tests
+# (test_qwen3_vle_trt_server_*) probe and POST to the FastAPI sidecar
+# via httpx. They skip cleanly when the server is unreachable, but the
+# import itself happens at test-collection time.
+httpx==0.28.1

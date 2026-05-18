@@ -1,0 +1,73 @@
+# =============================================================================
+# pe_vqa_2stage -- Docker Compose for Isolated Test Execution
+# =============================================================================
+#
+# Since PR #375 (aiprod-225), the pia package is embedded in the mono repo.
+# No sibling repo or additional build context is needed.
+#
+# Prerequisites:
+#   1. Build the shared base image FIRST (one-time, from Product-AI-mono root):
+#
+#      cd <Product-AI-mono root>
+#      docker build -t pia-test-base:latest \
+#          -f packages/pia_prod/AI/modules/Dockerfile .
+#
+# Usage:
+#   cd packages/pia_prod/AI/modules/pe_vqa_2stage/
+#   docker compose up --build
+#
+#   Or run a specific test:
+#   docker compose run --rm test-pe-vqa-2stage \
+#       python3 -m pytest \
+#       packages/pia_prod/AI/tests/modules/test_pe_vqa_2stage.py::test_import_module -v
+#
+# Cleanup:
+#   docker compose down --rmi local
+# =============================================================================
+
+services:
+  test-pe-vqa-2stage:
+    build:
+      # Context = Product-AI-mono root (5 levels up from this file).
+      # The .dockerignore there excludes assets/ (55GB+ model weights).
+      context: ../../../../..
+      dockerfile: packages/pia_prod/AI/modules/pe_vqa_2stage/Dockerfile
+      args:
+        BASE_IMAGE: pia-test-base:latest
+
+    # -- Environment -----------------------------------------------------------
+    environment:
+      - TEAM=ai
+      - ENV=dev
+      - NVIDIA_VISIBLE_DEVICES=all
+      # HuggingFace credentials for model download (set in shell or .env file)
+      - HF_NAMESPACE=${HF_NAMESPACE:-TeamPIA}
+      - HF_AUTH_TOKEN=${HF_AUTH_TOKEN:-}
+
+    # -- GPU access ------------------------------------------------------------
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    # -- Volume mounts ------------------------------------------------------------
+    # Mount host assets/ into the container so that:
+    #   1. Downloaded models (HF .onnx, .json, .engine) are cached on the host
+    #      and reused across container runs — avoids re-downloading every time.
+    #   2. Downloaded test videos (NAS .mp4) are likewise cached and reused.
+    #   3. TRT engine files built during tests persist for subsequent runs.
+    # Paths are relative to the build context (Product-AI-mono root).
+    volumes:
+      - ../../../../../assets/model:/workspace/assets/model:rw
+      - ../../../../../assets/videos:/workspace/assets/videos:rw
+
+    # -- Shared memory for PyTorch (prevents bus errors on large tensors) ------
+    shm_size: '8g'
+
+    # -- Network ---------------------------------------------------------------
+    # Host network mode required to reach internal NAS (172.168.47.36)
+    # for test video downloads via conftest.py nas_downloader fixture.
+    network_mode: host

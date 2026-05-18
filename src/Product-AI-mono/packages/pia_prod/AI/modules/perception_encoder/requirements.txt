@@ -1,0 +1,14 @@
+# =============================================================================
+# perception_encoder -- Module-Specific Dependencies
+# =============================================================================
+# Common deps are in ../requirements.txt (installed first by Dockerfile).
+# This file lists ONLY what perception_encoder needs on top of that.
+# =============================================================================
+
+# -- TensorRT inference engine -------------------------------------------------
+# Traced from: trt_export.py, trt_load.py, trt_utils.py
+tensorrt==10.8.0.43
+
+# -- JIT-compiled image processing ---------------------------------------------
+# Traced from: pia.vision.preprocessing.color -> numba (njit, prange)
+numba==0.61.2

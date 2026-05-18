@@ -1,0 +1,21 @@
+# pe_violence -- Module-Specific Dependencies
+# Common deps are in ../requirements.txt.
+
+# -- TensorRT inference engine -------------------------------------------------
+# Traced from: trt_export.py -> import tensorrt as trt
+tensorrt==10.8.0.43
+
+# -- JIT-compiled image processing ---------------------------------------------
+# Traced from: pia.vision.preprocessing.color -> numba
+numba==0.61.2
+
+# -- ONNX runtime (used by service / test inference path) ----------------------
+onnxruntime
+
+# -- pia.ai.model factory eager-load chain -------------------------------------
+# pia.ai.model loads all task factories eagerly (CP/OD/T2VRet/VQA/tracker).
+transformers
+einops
+filterpy
+# - ultralytics : pia.vision.roi.bbox_manager -> ultralytics.utils.plotting
+ultralytics==8.3.227

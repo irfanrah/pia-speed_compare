@@ -1,0 +1,115 @@
+# =============================================================================
+# pe_vle_2stage_async -- Docker Compose for Isolated Test Execution
+# =============================================================================
+#
+# Since PR #375 (aiprod-225), the pia package is embedded in the mono repo.
+# No sibling repo or additional build context is needed.
+#
+# Prerequisites:
+#   1. Build the shared base image FIRST (one-time, from Product-AI-mono root):
+#
+#      cd <Product-AI-mono root>
+#      docker build -t pia-test-base:latest \
+#          -f packages/pia_prod/AI/modules/Dockerfile .
+#
+#   2. (ON-mode tests only) Bring up the validation_server in a sibling compose:
+#
+#      cd packages/pia_prod/AI/modules/pe_vle_2stage_async/validation_server
+#      docker compose up -d --build
+#      # vLLM cold-start is ~60-120s — wait for /health to return 200.
+#
+# Usage:
+#   cd packages/pia_prod/AI/modules/pe_vle_2stage_async/
+#   docker compose up --build
+#   # Runs: python3 -m pytest -s -v ... --tb=short
+#
+#   Or run a specific test:
+#   docker compose run --rm test-pe-vle-2stage-async \
+#       python3 -m pytest \
+#       packages/pia_prod/AI/tests/modules/test_pe_vle_2stage_async.py::test_import_module -v
+#
+#   Or run only OFF-mode tests (no infra needed):
+#   docker compose run --rm test-pe-vle-2stage-async \
+#       python3 -m pytest \
+#       packages/pia_prod/AI/tests/modules/test_pe_vle_2stage_async.py \
+#       -v -k "off_mode or import or event_manager or build_headers or build_key \
+#              or ts_sync or message_format or anomaly_classifier or single_camera"
+#
+# Cleanup:
+#   docker compose down --rmi local
+# =============================================================================
+
+services:
+  test-pe-vle-2stage-async:
+    build:
+      # Context = Product-AI-mono root (5 levels up from this file).
+      # The .dockerignore there excludes assets/ (55GB+ model weights).
+      context: ../../../../..
+      dockerfile: packages/pia_prod/AI/modules/pe_vle_2stage_async/Dockerfile
+      args:
+        BASE_IMAGE: pia-test-base:latest
+
+    # -- Environment -----------------------------------------------------------
+    environment:
+      - TEAM=ai
+      - ENV=dev
+      - NVIDIA_VISIBLE_DEVICES=all
+      # HuggingFace credentials for model download (set in shell or .env file).
+      - HF_NAMESPACE=${HF_NAMESPACE:-TeamPIA}
+      - HF_AUTH_TOKEN=${HF_AUTH_TOKEN:-}
+
+      # ON-mode tests: validation_server lives in a sibling compose, reachable
+      # via host network mode below. Override these for non-default deployments.
+      - PE_VLE_VALIDATION_HOST=${PE_VLE_VALIDATION_HOST:-localhost}
+      - PE_VLE_VALIDATION_PORT=${PE_VLE_VALIDATION_PORT:-8200}
+
+      # ON-mode mq_consumer fixture: needs to reach the same RabbitMQ the
+      # validation_server publishes to. These keys are consistent with
+      # validation_server/docker-compose.yml.
+      - BACKEND_RABBITMQ_IP=${BACKEND_RABBITMQ_IP:-localhost}
+      - BACKEND_RABBITMQ_PORT=${BACKEND_RABBITMQ_PORT:-5672}
+      - BACKEND_RABBITMQ_USER_NAME=${BACKEND_RABBITMQ_USER_NAME:-guest}
+      - BACKEND_RABBITMQ_PASSWORD=${BACKEND_RABBITMQ_PASSWORD:-guest}
+      - BACKEND_RET_RESULT_RABBITMQ_QUEUE_NAME=${BACKEND_RET_RESULT_RABBITMQ_QUEUE_NAME:-ret_queue_dev}
+
+    # -- GPU access ------------------------------------------------------------
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    # -- Volume mounts ---------------------------------------------------------
+    # Mount host assets/ into the container so that:
+    #   1. Downloaded models (HF .onnx, .json, .engine) are cached on the host
+    #      and reused across container runs — avoids re-downloading every time.
+    #   2. Downloaded test videos (NAS .mp4) are likewise cached and reused.
+    #   3. TRT engine files built during tests persist for subsequent runs.
+    # Paths are relative to the build context (Product-AI-mono root).
+    volumes:
+      - ../../../../../assets/model:/workspace/assets/model:rw
+      - ../../../../../assets/videos:/workspace/assets/videos:rw
+
+    # -- Shared memory for PyTorch (prevents bus errors on large tensors) ------
+    shm_size: '8g'
+
+    # -- Network ---------------------------------------------------------------
+    # Host network mode required to:
+    #   - reach internal NAS (172.168.47.36) for test video downloads via
+    #     conftest.py nas_downloader fixture
+    #   - reach the validation_server compose (localhost:8200) and RabbitMQ
+    #     (localhost:5672) running on the host for ON-mode e2e tests.
+    network_mode: host
+
+    # -- Test command ----------------------------------------------------------
+    # `-s` streams print/log output live; `-v` shows each collected test name.
+    command:
+      - python3
+      - -m
+      - pytest
+      - -s
+      - -v
+      - packages/pia_prod/AI/tests/modules/test_pe_vle_2stage_async.py
+      - --tb=short

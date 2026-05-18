@@ -1,0 +1,17 @@
+import os
+
+INTERNVL3_MODEL_HF_PATH = os.getenv("MODEL_INTERNVL3_PATH", "assets/model/InternVL3-2B")
+
+FIRE_CATEGORY = ["fire_vqa", "화재_vqa"]
+FALLDOWN_CATEGORY = ["falldown_vqa", "쓰러짐_vqa"]
+MODEL_OUTPUTS = ["falldown", "fire"]
+SUPPORT_CATEGORIES = FIRE_CATEGORY + FALLDOWN_CATEGORY
+
+QUEUE_SIZE = 1
+ALARM_DURATION_THRESHOLD = 1
+
+N_GPUS = 1
+FRAME_PER_TILE_MAX_NUM = 16
+DEVICE = "cuda"
+MODEL_INF_DATA_TYPE = "bfloat16"
+MAX_NEW_TOKEN = 15

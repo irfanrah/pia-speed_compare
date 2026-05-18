@@ -1,0 +1,49 @@
+services:
+  # GPU 아키텍처별 VLLM_IMAGE 설정:
+  #   Blackwell (B200 등):          vllm/vllm-openai:cu130-nightly
+  #   Hopper / Ampere (H100, A100): vllm/vllm-openai:latest (기본값)
+  vllm-server:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    container_name: soil-qwen35-vllm
+    ipc: host
+    ports:
+      - "${VLLM_PORT:-9001}:${VLLM_PORT:-9001}"
+    volumes:
+      - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-0}
+      - HF_TOKEN=${HF_TOKEN:-}
+      - KV_CACHE_MEMORY_BYTES=${KV_CACHE_MEMORY_BYTES:-1G}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${GPU_COUNT:-1}
+              capabilities: [gpu]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        KV_CACHE_ARG=""
+        if [ -n "$${KV_CACHE_MEMORY_BYTES}" ]; then
+          KV_CACHE_ARG="--kv-cache-memory-bytes $${KV_CACHE_MEMORY_BYTES}"
+        fi
+        exec python3 -m vllm.entrypoints.openai.api_server \
+          --port ${VLLM_PORT:-9001} \
+          --model ${VLLM_MODEL:-Qwen/Qwen3.5-0.8B} \
+          --tensor-parallel-size ${TENSOR_PARALLEL_SIZE:-1} \
+          --max-model-len ${MAX_MODEL_LEN:-8192} \
+          --max-num-seqs ${MAX_NUM_SEQS:-128} \
+          --max-num-batched-tokens ${MAX_NUM_BATCHED_TOKENS:-131072} \
+          --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.3} \
+          --limit-mm-per-prompt '{"image": 1}' \
+          --seed 0 \
+          $$KV_CACHE_ARG \
+          ${EXTRA_VLLM_ARGS}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${VLLM_PORT:-9001}/v1/models"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 300s

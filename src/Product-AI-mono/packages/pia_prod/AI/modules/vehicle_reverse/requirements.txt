@@ -1,0 +1,25 @@
+# vehicle_reverse -- Module-Specific Dependencies
+# Common deps are in ../requirements.txt.
+
+# -- YOLO object detection -----------------------------------------------------
+ultralytics==8.3.227
+
+# -- Re-identification model ---------------------------------------------------
+torchreid==0.2.5
+# gdown: torchreid downloads pretrained weights from Google Drive at first use
+gdown
+# tensorboard: torchreid imports torch.utils.tensorboard at runtime
+tensorboard
+
+# -- YAML config for tracker --------------------------------------------------
+pyyaml
+
+# -- TensorRT (onnx2trt in test fixture + .engine model loading) --------------
+tensorrt==10.8.0.43
+
+# -- ONNX (model export / load) ------------------------------------------------
+onnx
+
+# -- JIT-compiled image processing ---------------------------------------------
+# Traced from: pia.vision.preprocessing.color -> numba (njit, prange)
+numba==0.61.2

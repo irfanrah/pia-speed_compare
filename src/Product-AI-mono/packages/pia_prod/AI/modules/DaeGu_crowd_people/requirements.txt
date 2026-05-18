@@ -1,0 +1,18 @@
+# DaeGu_crowd_people -- Module-Specific Dependencies
+# Common deps are in ../requirements.txt.
+
+# -- JIT-compiled image processing ---------------------------------------------
+# Traced from: pia.vision.preprocessing.color -> numba (njit, prange)
+numba==0.61.2
+
+# -- ONNX runtime --------------------------------------------------------------
+# Traced from: pia.ai.model -> tasks.CP.factory -> clip_ebc.clip_ebc -> onnxruntime
+onnxruntime
+
+# -- pia.ai.model factory eager-load chain -------------------------------------
+# pia.ai.model loads all task factories eagerly; required even if only OD used.
+transformers
+einops
+filterpy
+# - ultralytics : pia.vision.roi.bbox_manager -> ultralytics.utils.plotting
+ultralytics==8.3.227

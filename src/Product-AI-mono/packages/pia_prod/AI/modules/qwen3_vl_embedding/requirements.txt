@@ -1,0 +1,29 @@
+# qwen3_vl_embedding -- Module-Specific Dependencies
+# Common deps are in ../requirements.txt.
+#
+# Since pia.ai.model and pia.ai.tasks.*.factory now use lazy resolution,
+# importing pia.ai.model no longer pulls in cross-task deps (onnxruntime/
+# ultralytics/filterpy etc). This module only triggers what T2VRet's
+# Qwen3VLEmbedding model actually needs.
+
+# -- PyTorch -------------------------------------------------------------------
+# Provided by the Docker base image at the same version; listed here so that
+# local `pip install -r requirements.txt` outside Docker also pins correctly.
+torch==2.8.0
+torchvision==0.23.0
+
+# -- JIT-compiled image processing ---------------------------------------------
+# Traced from: pia.vision.preprocessing.color -> numba (njit, prange)
+numba==0.61.2
+
+# -- Qwen3-VL embedding model dependencies -------------------------------------
+# Traced from: pia.ai.tasks.T2VRet.models.qwen3_vl_embedding.models
+#              .qwen3_vl_embedding -> transformers + qwen_vl_utils
+# accelerate: required by transformers when device_map / torch_dtype is set
+# compressed-tensors: required to load FP8-quantized Qwen3-VL-Embedding-2B-FP8
+# Versions pinned to match a reference env that produces deterministic outputs;
+# unpinned latest changes BFloat16/Half coercion behavior on the FP8 path.
+transformers==4.57.3
+accelerate
+compressed-tensors==0.13.0
+qwen-vl-utils

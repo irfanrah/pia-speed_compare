@@ -1,0 +1,12 @@
+# vllm/vllm-openai already ships fastapi, uvicorn, pillow, numpy, pydantic,
+# httpx, and (transitively) huggingface_hub. The version pin below is for the
+# entrypoint's auto-download path — kept explicit so a base-image bump that
+# drops huggingface_hub doesn't silently break first-launch.
+huggingface_hub>=0.20    # entrypoint.sh / download_model.py: HF Hub fetch
+
+# Self-contained publisher / S3 / Redis stack:
+pika>=1.3                # RabbitMQ (KTT) producer
+confluent-kafka>=2.3,<3  # Kafka (ES MACS) producer
+fastavro>=1.9            # Avro schemaless wire format for Kafka
+boto3>=1.28              # S3 thumbnail uploads
+redis>=5,<6              # UUID pairing tracker

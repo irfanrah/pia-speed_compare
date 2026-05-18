@@ -1,0 +1,40 @@
+services:
+  pia-qwen3-vle-trt-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pia-qwen3-vle-trt:local
+    container_name: pia-qwen3-vle-trt
+    ipc: host
+    ports:
+      - "${SERVER_PORT:-9002}:${SERVER_PORT:-9002}"
+    volumes:
+      # Monorepo (pia_prod) — installed at container startup
+      - ${MONO_SRC:-/home/jordan/Research/Product-AI-mono}:/opt/mono
+      # TensorRT engines directory — read-only
+      - ${TRT_ENGINE_DIR:-/home/jordan/Research/Product-AI-mono/assets/model/Qwen3-VL-Embedding-2B-onnx}:/models/Qwen3VLE-TRT:ro
+    environment:
+      - QWEN3VLE_TRT_ONNX_DIR_PATH=/models/Qwen3VLE-TRT
+      - QWEN3VLE_TRT_TEXT_FEATURES_PATH=/models/Qwen3VLE-TRT/VLE_BF16_text_features.json
+      
+      - QWEN3VLE_TRT_QUEUE_SIZE=1
+      - QWEN3VLE_TRT_ALARM_DURATION_THRESHOLD=1
+      - DEVICE=${DEVICE:-cuda}
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=${SERVER_PORT:-9002}
+      - MAX_INFLIGHT_REQUESTS=${MAX_INFLIGHT_REQUESTS:-2}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-0}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${GPU_COUNT:-1}
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${SERVER_PORT:-9002}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s

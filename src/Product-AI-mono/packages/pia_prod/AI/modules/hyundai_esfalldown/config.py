@@ -1,0 +1,37 @@
+import os
+import torch
+
+IMG_SIZE = (336, 336)  # (height, width)
+INPUT_SIZE = (3, *IMG_SIZE)
+DEVICE = "cuda"
+PERCEPTION_ENCODER_PYTORCH_PATH = os.getenv(
+    "MODEL_PERCEPTION_ENCODER_PYTORCH_PATH", "assets/model/PE-Core-L14-336.pt"
+)
+PERCEPTION_ENCODER_ONNX_PATH = os.getenv(
+    "MODEL_PERCEPTION_ENCODER_ONNX_PATH", "assets/model/PE-Core-L14-336.onnx"
+)
+PERCEPTION_ENCODER_TRT_PATH = os.getenv(
+    "MODEL_PERCEPTION_ENCODER_TRT_PATH", "assets/model/PE-Core-L14-336.engine"
+)
+PERCEPTION_ENCODER_TXT_FEATURE_PATH = os.getenv(
+    "MODEL_PERCEPTION_ENCODER_TXT_FEATURE_ESFALLDOWN_PATH", "assets/model/text_features_hyundai_esfalldown.json"
+)
+
+INDEX_MAPPING = {0: "normal", 5: "esfalldown"}
+
+ESFALLDOWN_CATEGORY = ["esfalldown_ret", "에스컬레이터쓰러짐_ret"]
+ALL_CATEGORIES = ESFALLDOWN_CATEGORY
+
+CATEGORY_EVENT_MAP = {
+    "esfalldown": ESFALLDOWN_CATEGORY,
+}
+
+TEMPORAL_SIZE = 1
+INFERENCE_SEQUENCE_SIZE = 1
+ESFALLDOWN_QUEUE_SIZE = int(os.environ.get("ESFALLDOWN_QUEUE_SIZE", 4))
+ESFALLDOWN_ALARM_DURATION_THRESHOLD = int(os.environ.get("ESFALLDOWN_ALARM_DURATION_THRESHOLD", 2))
+
+ESFALLDOWN_TOP_CANDIDATE = int(os.environ.get("ESFALLDOWN_TOP_CANDIDATE", 13))
+ESFALLDOWN_TOP_K = 4
+
+IMAGE_DTYPE = torch.float16

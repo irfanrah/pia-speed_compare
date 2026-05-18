@@ -1,0 +1,37 @@
+# =============================================================================
+# .dockerignore for Product-AI-mono
+# Prevents large model/data files from being sent to the Docker build context.
+# =============================================================================
+
+# Model weights and downloaded assets (55GB+)
+assets/
+
+# Git history
+.git/
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test artifacts
+profile.prof
+*.zip
+
+# Temporary files
+temp.py
+infer.py
+infer_helmet.py
+make_clip.py
+remove_mean_pooling.py
+test_helmet_20videos.py

@@ -1,0 +1,29 @@
+# two_stage_pe_qwen3vle -- Module-Specific Dependencies
+# Common deps are in ../requirements.txt.
+# Composes pe_violence + qwen3_vl_embedding, inherits their deps.
+#
+# Since pia.ai.model and pia.ai.tasks.*.factory now use lazy resolution,
+# importing pia.ai.model no longer pulls in cross-task deps. This module
+# only triggers what its actual two-stage path needs (T2VRet/PE for stage 1
+# + T2VRet/qwen3_vl_embedding for stage 2).
+
+# -- TensorRT inference engine -------------------------------------------------
+# Traced from: pe_violence.trt_export -> import tensorrt as trt
+tensorrt==10.8.0.43
+
+# -- JIT-compiled image processing ---------------------------------------------
+# Traced from: pia.vision.preprocessing.color -> numba (njit, prange)
+numba==0.61.2
+
+# -- ONNX runtime (PiaONNXTensorRTModel .onnx session in pe_violence stage) ---
+onnxruntime
+
+# -- Qwen3-VL embedding (stage 2) dependencies --------------------------------
+# Traced from: pia.ai.tasks.T2VRet.models.qwen3_vl_embedding -> transformers +
+# qwen_vl_utils. accelerate required by transformers when device_map is set.
+# compressed-tensors required to load FP8-quantized Qwen3-VL-Embedding-2B-FP8.
+# Versions pinned to match a reference env that produces deterministic outputs.
+transformers==4.57.3
+accelerate
+compressed-tensors==0.13.0
+qwen-vl-utils

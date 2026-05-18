@@ -1,0 +1,214 @@
+import logging
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Union
+
+import pytz
+from concurrent_log_handler import ConcurrentTimedRotatingFileHandler
+from rich.logging import RichHandler
+
+
+class CallLog:
+    CRITICAL = 50
+    FATAL = CRITICAL
+    ERROR = 40
+    WARNING = 30
+    WARN = WARNING
+    INFO = 20
+    DEBUG = 10
+    NOTSET = 0
+    _STREAM_HANDLER_FORMAT = "[%(asctime)s] >> %(message)s"
+    _FILE_HANDLER_FORMAT = "%(asctime)s/%(levelname)s\n%(message)s"
+    _TIME_FORMAT = "%y%m%d_%Hh%Mm"
+    _FILE_TIME_STAMP = "%y%m%d_%Hh%Mm"
+    _str_Level = {
+        "c": logging.CRITICAL,
+        "f": logging.FATAL,
+        "e": logging.ERROR,
+        "w": logging.WARNING,
+        "i": logging.INFO,
+        "d": logging.DEBUG,
+        "n": logging.NOTSET,
+    }
+    _int_Level = {
+        CRITICAL: logging.CRITICAL,
+        FATAL: logging.FATAL,
+        ERROR: logging.ERROR,
+        WARNING: logging.WARNING,
+        INFO: logging.INFO,
+        DEBUG: logging.DEBUG,
+        NOTSET: logging.NOTSET,
+    }
+
+    def __init__(
+        self,
+        log_name,
+        log_level: Union[str, int],
+        log_extension=".log",
+        propagate: bool = False,
+    ) -> None:
+        self._logger = logging.getLogger(log_name)
+        self._log_extension = self._extension_check(log_extension)
+        self._file_handler = None
+        self._stream_handler = None
+        self._root_logger_log_level = self._call_level(log_level)
+        self._logger.setLevel(self._root_logger_log_level)
+        self._logger.propagate = propagate
+
+    def __del__(self):
+        for handler in self._logger.handlers:
+            if handler.name == "file_handler":
+                try:
+                    self._logger.removeHandler(handler)
+                    handler.close()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _extension_check(extension):
+        if extension[0] == ".":
+            return extension
+        else:
+            return "." + extension
+
+    @staticmethod
+    def _call_level(level: Union[int, str]):
+        if isinstance(level, str):
+            level = CallLog._str_Level[level[0].lower()]
+        elif isinstance(level, int):
+            level = CallLog._int_Level[level]
+        else:
+            raise ValueError("level must be int or string.")
+        return level
+
+    def add_file_handler(
+        self,
+        path: str,
+        H_type=None,
+        when="midnight",
+        interval=1,
+        backupCount=60,
+        log_level: Union[str, int] = None,
+        name="file_handler",
+    ) -> None:
+        if H_type == "rotating" or H_type == "R":
+            handler = ConcurrentTimedRotatingFileHandler(
+                filename=f"{path}{self._log_extension}",
+                encoding="utf-8",
+                when=when,
+                interval=interval,
+                backupCount=backupCount,
+                delay=False,
+            )
+        else:
+            handler = logging.FileHandler(
+                filename=f"{path}{self._log_extension}",
+                mode="a",
+                encoding="utf-8",
+            )
+        if log_level is not None:
+            log_level = self._call_level(log_level)
+            assert (
+                self._root_logger_log_level <= log_level
+            ), "Handler level is low than root log level"
+            handler.setLevel(log_level)
+        handler.setFormatter(
+            CallLog.TimeFormatter(CallLog._FILE_HANDLER_FORMAT, datefmt="%Y-%m-%d %H:%M:%S")
+        )
+        handler.name = name
+        self._logger.addHandler(handler)
+        self._file_handler = handler
+        return
+
+    def add_stream_handler(
+        self,
+        H_type: str = "rich",
+        log_level: Union[str, int] = None,
+        name="stream_handler",
+    ) -> None:
+        if H_type == "rich":
+            handler = RichHandler(rich_tracebacks=True)
+        elif H_type == "stream":
+            handler = logging.StreamHandler()
+        if log_level is not None:
+            log_level = self._call_level(log_level)
+            assert (
+                self._root_logger_log_level <= log_level
+            ), "Handler level is low than root log level"
+            handler.setLevel(log_level)
+        handler.name = name
+        handler.setFormatter(logging.Formatter(CallLog._STREAM_HANDLER_FORMAT))
+        self._logger.addHandler(handler)
+        self._stream_handler = handler
+        return
+
+    def remove_file_handler(self):
+        self._logger.removeHandler(self._file_handler)
+        self._file_handler.close()
+
+    def debug(self, msg, *args, **kwargs):
+        self._logger.debug(msg, *args, **kwargs)
+
+    def info(self, msg, *args, **kwargs):
+        self._logger.info(msg, *args, **kwargs)
+
+    def warning(self, msg, *args, **kwargs):
+        self._logger.warning(msg, *args, **kwargs)
+
+    def error(self, msg, *args, **kwargs):
+        self._logger.error(msg, *args, **kwargs)
+
+    def exception(self, msg, *args, **kwargs):
+        self._logger.exception(msg, *args, **kwargs)
+
+    def critical(self, msg, *args, **kwargs):
+        self._logger.critical(msg, *args, **kwargs)
+
+    def handle_exception(self, *args):
+        if len(args) == 3:
+            self._logger.error(
+                "Unexpected exception",
+                exc_info=(args[0], args[1], args[2]),
+                extra={"markup": False, "highlighter": None},
+            )
+        elif len(args) == 1:
+            self._logger.error(
+                "Unexpected exception",
+                exc_info=(args[0].exc_type, args[0].exc_value, args[0].exc_traceback),
+                extra={"markup": False, "highlighter": None},
+            )
+
+    class TimeFormatter(logging.Formatter):
+        """logging.Formatter에 타임존 내부 설정"""
+
+        timezone = "Asia/Seoul"
+
+        def __init__(self, fmt, datefmt: str) -> None:
+            super().__init__(fmt=fmt, datefmt=datefmt)
+
+        def converter(self, timestamp):
+            dt = datetime.fromtimestamp(timestamp, tz=pytz.UTC)
+            return dt.astimezone(pytz.timezone(self.timezone))
+
+        def formatTime(self, record, datefmt=None):
+            dt = self.converter(record.created)
+            if datefmt:
+                s = dt.strftime(datefmt)
+            else:
+                try:
+                    s = dt.isoformat(timespec="seconds")
+                except TypeError:
+                    s = dt.isoformat()
+            return s
+
+
+def resolve_log_basename():
+    main_mod = sys.modules.get("__main__")
+    pkg = getattr(main_mod, "__package__", None)
+    if pkg:
+        return pkg.split(".")[-1]
+    file = getattr(main_mod, "__file__", None)
+    if file:
+        return Path(file).stem
+    return "logging"  # default

@@ -1,0 +1,20 @@
+# =============================================================================
+# pe_vqa_2stage -- Module-Specific Dependencies
+# =============================================================================
+# Common deps are in ../requirements.txt (installed first by Dockerfile).
+# This file lists ONLY what pe_vqa_2stage needs on top of that.
+# =============================================================================
+
+# -- TensorRT inference engine -------------------------------------------------
+# Traced from: trt_export.py, trt_load.py, trt_utils.py (PE 1단계 추론)
+tensorrt==10.8.0.43
+
+# -- JIT-compiled image processing ---------------------------------------------
+# Traced from: pia.vision.preprocessing.color -> numba (njit, prange)
+numba==0.61.2
+
+# -- HTTP client (validation_server 위임용) ----------------------------------
+# Traced from: service.py -> import httpx (PeVqa2StageService._send_to_validation_server).
+# import 자체는 ON/OFF 모드 무관하게 service.py 모듈 로딩 시 unconditional이므로,
+# OFF 모드 테스트만 돌리는 모듈 단위 Docker에서도 반드시 필요.
+httpx==0.28.1

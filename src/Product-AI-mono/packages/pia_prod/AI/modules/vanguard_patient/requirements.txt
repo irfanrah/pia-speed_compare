@@ -1,0 +1,24 @@
+# vanguard_patient -- Module-Specific Dependencies
+# Common deps are in ../requirements.txt.
+#
+# Uses: OC-SORT tracker (filterpy via Kalman filter inside yolox),
+#       PiaONNXTensorRTModel (onnxruntime / tensorrt at inference time).
+# Does NOT trigger any pia.ai task factory at module load — lazy resolver
+# in pia.ai.model keeps OD/CP/T2VRet/VQA/tracker factories dormant.
+
+# -- OC-SORT tracker -----------------------------------------------------------
+# Traced from: tracker.py -> trackers.ocsort_tracker.*
+yolox @ git+https://github.com/noahcao/OC_SORT.git@7d06bffe98b5e57cc696ce56739554483c7e99ca
+
+# -- TensorRT (onnx2trt in test fixture + .engine model loading) --------------
+tensorrt==10.8.0.43
+
+# -- ONNX runtime (PiaONNXTensorRTModel .onnx session) ------------------------
+onnxruntime
+
+# -- JIT-compiled image processing ---------------------------------------------
+# Traced from: pia.vision.preprocessing.color -> numba (njit, prange)
+numba==0.61.2
+
+# -- Kalman filter (OC-SORT tracker uses filterpy) -----------------------------
+filterpy

@@ -1,0 +1,102 @@
+services:
+  pe-vle-validator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Base image per GPU architecture:
+        #   Blackwell (e.g. B200):                vllm/vllm-openai:cu130-nightly
+        #   Hopper / Ampere (H100, A100):         vllm/vllm-openai:latest
+        #   Stable default for Qwen3VLE:          vllm/vllm-openai:v0.14.0
+        # v0.14.0 is the pinned default because Qwen3VLE was tuned against
+        # it; a side-by-side test on `latest` (v0.19.1) showed ~30% higher
+        # per-request latency on this pooling/embedding workload. Override
+        # via VLLM_IMAGE only when you need Blackwell support or a newer
+        # feature.
+        BASE_IMAGE: ${VLLM_IMAGE:-vllm/vllm-openai:v0.14.0}
+    image: pe-vle-validator:local
+    container_name: pe-vle-validator
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${GPU_COUNT:-1}
+              capabilities: [gpu]
+    ports:
+      - "${VALIDATION_SERVER_PORT:-8200}:8200"
+    ipc: host
+    shm_size: 16g
+    environment:
+      # --- vLLM Engine ---
+      MODEL_PATH: /models/${MODEL_NAME:-Qwen3-VL-Embedding-2B-FP8}
+      DTYPE: ${DTYPE:-bfloat16}
+      GPU_MEMORY_UTILIZATION: ${GPU_MEMORY_UTILIZATION:-0.3}
+      VLLM_MAX_CONCURRENCY: ${VLLM_MAX_CONCURRENCY:-10}
+      MAX_MODEL_LEN: ${MAX_MODEL_LEN:-8192}
+      LIMIT_MM_PER_PROMPT_VIDEO: ${LIMIT_MM_PER_PROMPT_VIDEO:-1}
+      LIMIT_MM_PER_PROMPT_IMAGE: ${LIMIT_MM_PER_PROMPT_IMAGE:-1}
+      KV_CACHE_MEMORY_BYTES: ${KV_CACHE_MEMORY_BYTES:-}
+      MAX_NUM_SEQS: ${MAX_NUM_SEQS:-}
+      MAX_NUM_BATCHED_TOKENS: ${MAX_NUM_BATCHED_TOKENS:-}
+
+      # --- HuggingFace Auto-Download ---
+      HF_NAMESPACE: ${HF_NAMESPACE:-PIA-SPACE-LAB}
+      HF_MODEL_REPO_ID: ${HF_MODEL_REPO_ID:-${HF_NAMESPACE:-PIA-SPACE-LAB}/Qwen3-VL-Embedding-2B-FP8}
+      HF_TEXT_FEATURES_REPO_ID: ${HF_TEXT_FEATURES_REPO_ID:-}
+      HF_TEXT_FEATURES_FILE: ${HF_TEXT_FEATURES_FILE:-VLE_FP8_text_features.json}
+      HF_AUTH_TOKEN: ${HF_AUTH_TOKEN:-}
+
+      # --- Classifier & Server Configuration ---
+      VALIDATION_SERVER_HOST: 0.0.0.0
+      VALIDATION_SERVER_PORT: 8200
+      PE_VLE_FAIL_OPEN: ${PE_VLE_FAIL_OPEN:-true}
+      QWEN3VLE_VLLM_TEXT_FEATURES_PATH: /models/${MODEL_NAME:-Qwen3-VL-Embedding-2B-FP8}/VLE_FP8_text_features.json
+
+      # --- Infrastructure Configuration ---
+      MESSAGING_BACKEND: ${MESSAGING_BACKEND:-kafka}
+
+      # --- RabbitMQ ---
+      BACKEND_RABBITMQ_IP: ${BACKEND_RABBITMQ_IP:-host.docker.internal}
+      BACKEND_RABBITMQ_PORT: ${BACKEND_RABBITMQ_PORT:-5672}
+      BACKEND_RABBITMQ_USER_NAME: ${BACKEND_RABBITMQ_USER_NAME:-guest}
+      BACKEND_RABBITMQ_PASSWORD: ${BACKEND_RABBITMQ_PASSWORD:-guest}
+      BACKEND_RABBITMQ_EXCHANGE: ${BACKEND_RABBITMQ_EXCHANGE:-}
+      PYTHON_RABBITMQ_HEARBEAT_INTERVAL: ${PYTHON_RABBITMQ_HEARBEAT_INTERVAL:-60}
+      BACKEND_RET_RESULT_RABBITMQ_QUEUE_NAME: ${BACKEND_RET_RESULT_RABBITMQ_QUEUE_NAME:-ret_queue_dev}
+
+      # --- Kafka ---
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-host.docker.internal:9092}
+      KAFKA_TOPIC_EVENT_PROCESS: ${KAFKA_TOPIC_EVENT_PROCESS:-event.process}
+
+      # --- S3 ---
+      BACKEND_S3_ACCESS_KEY: ${BACKEND_S3_ACCESS_KEY:-}
+      BACKEND_S3_SECRET_KEY: ${BACKEND_S3_SECRET_KEY:-}
+      BACKEND_S3_THUMBNAIL_BUCKET_REGION: ${BACKEND_S3_THUMBNAIL_BUCKET_REGION:-}
+      BACKEND_S3_ENDPOINT: ${BACKEND_S3_ENDPOINT:-}
+      BACKEND_S3_THUMBNAIL_BUCKET_NAME: ${BACKEND_S3_THUMBNAIL_BUCKET_NAME:-thumbnail}
+
+      # --- Redis ---
+      REDIS_IP: ${REDIS_IP:-host.docker.internal}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_DB: ${REDIS_DB:-0}
+      UUID_TTL_SECONDS: ${UUID_TTL_SECONDS:-3600}
+
+      # --- Hardware Device Mapping ---
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-0}
+      
+    extra_hosts:
+      # Map host network for Linux environments
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Host directory mount for FP8 checkpoint + text-anchors JSON
+      - ${MODEL_DIR:?MODEL_DIR is required - set it to a host directory the validator can read/write the FP8 checkpoint to. See README.md "Model download" for examples.}:/models:rw
+    restart: unless-stopped
+    healthcheck:
+      # Accommodates vLLM cold-start 
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8200/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s

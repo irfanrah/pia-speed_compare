@@ -1,0 +1,17 @@
+# glenc_workinghigh -- Module-Specific Dependencies
+# Common deps are in ../requirements.txt.
+# Mirrors Daegu_intrusion's deps (same OD pipeline + Person detection model).
+
+# -- YOLO object detection -----------------------------------------------------
+ultralytics==8.3.227
+
+# -- TensorRT (onnx2trt in test fixture + .engine model loading) --------------
+tensorrt==10.8.0.43
+
+# -- JIT-compiled image processing ---------------------------------------------
+# Traced from: pia.vision.preprocessing.color -> numba (njit, prange)
+numba==0.61.2
+
+# -- ONNX runtime --------------------------------------------------------------
+# Traced from: PiaONNXTensorRTModel.load_onnx_model -> import onnxruntime
+onnxruntime==1.20.1

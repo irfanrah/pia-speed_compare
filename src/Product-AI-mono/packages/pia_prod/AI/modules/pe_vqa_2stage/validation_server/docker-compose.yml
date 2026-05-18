@@ -1,0 +1,81 @@
+services:
+  pe-vqa-2stage:
+    build:
+      context: .
+      args:
+        # GPU 아키텍처별 베이스 이미지:
+        #   Blackwell (B200 등):          vllm/vllm-openai:cu130-nightly
+        #   Hopper / Ampere (H100, A100): vllm/vllm-openai:latest
+        BASE_IMAGE: ${VLLM_IMAGE:-vllm/vllm-openai:cu130-nightly}
+    container_name: pe-vqa-2stage
+    ipc: host
+    ports:
+      - "${VALIDATION_PORT:-8100}:${VALIDATION_SERVER_PORT:-8100}"
+    volumes:
+      # HF 모델 캐시 — Product-AI-mono 다른 모듈과 통일된 경로(`assets/model/huggingface`).
+      # 호스트 절대경로를 MODEL_HF_CACHE_DIR로 지정 (예: <repo_root>/assets/model/huggingface).
+      # 미설정 시 호스트 사용자 홈의 ~/.cache/huggingface로 fallback (개발 편의).
+      - ${MODEL_HF_CACHE_DIR:-${HOME}/.cache/huggingface}:/app/assets/model/huggingface
+    environment:
+      # vLLM
+      - VLLM_MODEL=${VLLM_MODEL:-Qwen/Qwen3.5-0.8B}
+      - TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-1}
+      - MAX_MODEL_LEN=${MAX_MODEL_LEN:-8192}
+      - MAX_NUM_SEQS=${MAX_NUM_SEQS:-128}
+      - MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-131072}
+      - GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.3}
+      - KV_CACHE_MEMORY_BYTES=${KV_CACHE_MEMORY_BYTES:-1G}
+      - EXTRA_VLLM_ARGS=${EXTRA_VLLM_ARGS:-}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-0}
+      - HF_TOKEN=${HF_TOKEN:-}
+      # Validation Server
+      # 컨테이너 내부 vLLM 포트 — host network에서 외부 vLLM과 충돌 시 override 가능
+      - VLLM_INTERNAL_PORT=${VLLM_INTERNAL_PORT:-8000}
+      # wrapper(server.py)가 vLLM에 연결할 URL — 위 INTERNAL_PORT 자동 반영
+      - VLLM_API_BASE=${VLLM_API_BASE:-http://localhost:${VLLM_INTERNAL_PORT:-8000}/v1}
+      - VLLM_MAX_CONCURRENCY=${VLLM_MAX_CONCURRENCY:-10}
+      - VLLM_TIMEOUT=${VLLM_TIMEOUT:-120}
+      - VLLM_MAX_TOKENS=${VLLM_MAX_TOKENS:-64}
+      - VALIDATION_SERVER_HOST=${VALIDATION_SERVER_HOST:-0.0.0.0}
+      - VALIDATION_SERVER_PORT=${VALIDATION_SERVER_PORT:-8100}
+      # RabbitMQ — Product-AI-mono(KTT 등) 표준 키 (Package-Common-AI-pia_ai_package와 동일)
+      - BACKEND_RABBITMQ_IP=${BACKEND_RABBITMQ_IP:-rabbitmq}
+      - BACKEND_RABBITMQ_PORT=${BACKEND_RABBITMQ_PORT:-5672}
+      - BACKEND_RABBITMQ_USER_NAME=${BACKEND_RABBITMQ_USER_NAME:-guest}
+      - BACKEND_RABBITMQ_PASSWORD=${BACKEND_RABBITMQ_PASSWORD:-guest}
+      - BACKEND_RABBITMQ_EXCHANGE=${BACKEND_RABBITMQ_EXCHANGE:-}
+      - PYTHON_RABBITMQ_HEARBEAT_INTERVAL=${PYTHON_RABBITMQ_HEARBEAT_INTERVAL:-60}
+      - BACKEND_RET_RESULT_RABBITMQ_QUEUE_NAME=${BACKEND_RET_RESULT_RABBITMQ_QUEUE_NAME:-ret_queue_dev}
+      # S3 — ES MACS 표준 키
+      - BACKEND_S3_ACCESS_KEY=${BACKEND_S3_ACCESS_KEY:-}
+      - BACKEND_S3_SECRET_KEY=${BACKEND_S3_SECRET_KEY:-}
+      - BACKEND_S3_THUMBNAIL_BUCKET_REGION=${BACKEND_S3_THUMBNAIL_BUCKET_REGION:-}
+      - BACKEND_S3_ENDPOINT=${BACKEND_S3_ENDPOINT:-}
+      - BACKEND_S3_THUMBNAIL_BUCKET_NAME=${BACKEND_S3_THUMBNAIL_BUCKET_NAME:-thumbnail}
+      # Redis — KTT 표준 키
+      - REDIS_IP=${REDIS_IP:-localhost}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_DB=${REDIS_DB:-0}
+      - UUID_TTL_SECONDS=${UUID_TTL_SECONDS:-3600}
+      # 메시징 백엔드 선택 (rabbitmq | kafka)
+      # default는 ES MACS(kafka). KTT 등에서는 .env에 MESSAGING_BACKEND=rabbitmq 명시 필요.
+      - MESSAGING_BACKEND=${MESSAGING_BACKEND:-kafka}
+      # Kafka (MESSAGING_BACKEND=kafka일 때 사용 — ES MACS 환경, fastavro schemaless 와이어 포맷)
+      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-localhost:9092}
+      - KAFKA_TOPIC_EVENT_PROCESS=${KAFKA_TOPIC_EVENT_PROCESS:-event.process}
+      # 정책
+      - PE_VQA_2STAGE_FAIL_OPEN=${PE_VQA_2STAGE_FAIL_OPEN:-true}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${GPU_COUNT:-1}
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${VALIDATION_SERVER_PORT:-8100}/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 300s

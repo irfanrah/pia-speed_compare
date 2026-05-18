@@ -1,0 +1,17 @@
+# glenc_harness -- Module-Specific Dependencies
+# Common deps are in ../requirements.txt (installed first by Dockerfile).
+# This file lists ONLY what glenc_harness needs on top of that.
+
+# -- TensorRT inference engine -------------------------------------------------
+# Traced from:
+#   - service.py / config.py: .engine model loading via PiaONNXTensorRTModel
+#   - test fixture: pia.ai.exports.trt.onnx2trt for engine build
+tensorrt==10.8.0.43
+
+# -- ONNX runtime --------------------------------------------------------------
+# Traced from: PiaONNXTensorRTModel.load_onnx_model -> import onnxruntime as ort
+onnxruntime
+
+# -- JIT-compiled image processing ---------------------------------------------
+# Traced from: pia.vision.preprocessing.color -> numba (njit, prange)
+numba==0.61.2

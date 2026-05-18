@@ -1,0 +1,40 @@
+# =============================================================================
+# pe_vle_2stage_async -- Module-Specific Dependencies
+# =============================================================================
+# Common deps are in ../requirements.txt (installed first by Dockerfile).
+# This file lists ONLY what pe_vle_2stage_async needs on top of that.
+#
+# The validation_server's heavy runtime deps (vllm, confluent-kafka, fastavro)
+# are NOT listed here — that container builds from validation_server/
+# requirements.txt against the vllm-openai base image. A small subset of
+# server import-time deps is listed below because the module test suite imports
+# validation_server/server.py to unit-test AnomalyClassifier.
+# =============================================================================
+
+# -- TensorRT inference engine -------------------------------------------------
+# Traced from: trt_export.py, trt_load.py, trt_utils.py (PE Stage-1 inference).
+tensorrt==10.8.0.43
+
+# -- JIT-compiled image processing ---------------------------------------------
+# Traced from: pia.vision.preprocessing.color -> numba (njit, prange).
+numba==0.61.2
+
+# -- HTTP client (validation_server delegation) --------------------------------
+# Traced from: service.py -> import httpx (PeVle2StageAsyncService._send_to_validation_server).
+# The import is unconditional at service.py module-load time, so even an
+# OFF-mode-only test run inside this module-isolated container needs it.
+httpx==0.28.1
+
+# -- ON-mode test deps (RabbitMQ consumer in test_pe_vle_2stage_async.py) ------
+# `pika` is imported at the top of the test file for the mq_consumer fixture
+# (drains messages published by validation_server during ON-mode e2e tests).
+# Pinned to the same version validation_server uses for wire-format parity.
+pika>=1.3
+
+# -- validation_server/server.py import deps for component tests ---------------
+# The classifier test imports server.py, but does not call Qwen3VLEEmbedder.load(),
+# so vLLM is still intentionally excluded from this module test image.
+fastapi>=0.115
+pillow>=10
+boto3>=1.28
+redis>=5,<6
