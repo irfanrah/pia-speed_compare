@@ -4,34 +4,39 @@ Instantiates ``pia_prod.AI.modules.ft_pe.service.FTPEService`` and times the
 three split stages exposed in ``_detect``.
 
 Stage boundary convention (shared with the PE bench):
-    * ``half_cycle`` is the **video-side** pipeline -- everything up to and
-      including the latest per-stream **video embedding** ``(B, 1024)``.
-      For FT_PE that means: preprocess + temporal encode + per-stream
-      mean-pool over a TEMPORAL_SIZE buffer.
-    * The moment any text-side work runs (text embeddings, cos-sim against
-      per-class text features, alarm event manager), the timing is no longer
-      ``half_cycle`` -- that work lives only in ``full_cycle``.
+    * ``half_cycle`` = **one production tick of the vision side**: disk read
+      + ``_preprocess_stage`` + gather buffer + temporal model + frame buffer
+      + per-stream mean-pool -> video embedding ``(B, 1024)``.
+    * ``full_cycle`` = same tick **plus** the text side: L2 norm + per-class
+      cos-sim against text features + alarm event manager.
+    * So ``half_cycle <= full_cycle`` by construction -- the only difference
+      between the two timings is the text-side cost.
 
     full_cycle:  disk read -> _preprocess_stage -> _postprocess_stage
-                 (end-to-end per-tick production cycle: sliding-window
-                  encode + mean-pool + per-class cos sim vs text features
-                  + alarm event manager)
-    half_cycle:  in-memory ndarrays for B*T frames -> _preprocess_stage
-                 (cv_bgr2rgb_batch + ROI + preprocess_image)
-                 -> reshape (B*T,C,H,W) -> (B,T,C,H,W) -> _inference_stage
-                 -> per-stream mean-pool over a TEMPORAL_SIZE buffer
-                 (synthetic bulk run, stops at video_emb (B, 1024); no
-                  text-side work)
+                 (end-to-end per-tick production cycle: gather buffer +
+                  sliding-window encode + frame buffer + mean-pool +
+                  L2 norm + per-class cos sim + alarm event manager)
+    half_cycle:  disk read -> _preprocess_stage(B)
+                 -> (gather buffer + model + frame buffer + per-stream
+                  mean-pool, reusing service state)
+                 (stops at video_emb (B, 1024); no text-side work)
     inference:   already-preprocessed CUDA tensor (B,T,C,H,W)
                  -> _inference_stage
                  (stops at per-frame img emb (B, T, 1024); no preprocess,
                   no mean-pool, no text)
 
+half_cycle reuses ``service.gather_frame_buffers`` and
+``service.frame_buffers``, so each call advances the per-stream state by
+exactly one tick -- the same advance ``_detect`` causes for full_cycle.
+The timed loop alternates full / half / inference within each iter; full
+and half each advance the state, inference does not.
+
 Throughput for all three stages is reported in **frames encoded per second**
-(``*_imgs_per_s = B * T * 1000 / mean_ms``). For full_cycle this works because
-the bench forces stride=1, so each tick re-encodes a full (B, T) window. The
-production input rate (streams per second, i.e. unique frames ingested per
-tick) is reported separately as ``throughput.full_cycle_streams_per_s``.
+(``*_imgs_per_s = B * T * 1000 / mean_ms``). For full_cycle and half_cycle
+this works because the bench forces stride=1, so each tick re-encodes a full
+(B, T) window. Production input rate (streams per second, i.e. unique frames
+ingested per tick) is also reported as ``throughput.full_cycle_streams_per_s``
+and ``throughput.half_cycle_streams_per_s``.
 
 The full_cycle warms up FTPEService's temporal buffer for ``TEMPORAL_SIZE +
 window_size`` ticks before the timed loop so every measured iter produces a
@@ -206,70 +211,91 @@ def benchmark(
 
     stream_ids = [f"stream_{i}" for i in range(batch_size)]
     user_params = make_user_params(batch_size)
-    # Separate user_params for the synthetic B*T bulk path so _preprocess_stage
-    # accepts a 1-to-1 (frame, user_param) pairing.
-    bulk_user_params = make_user_params(batch_size * frames, cam_prefix="bulk")
     template = load_image_ndarray(image_path)
 
     def fresh_batches() -> list[np.ndarray]:
         return [template.copy() for _ in range(batch_size)]
 
-    def fresh_bulk_batches() -> list[np.ndarray]:
-        return [template.copy() for _ in range(batch_size * frames)]
-
     # --- Build a preprocessed (B, T, C, H, W) tensor for the inference-only
-    # stage (synthetic flow that bypasses the per-stream buffer).
-    # Engine I/O is FP32 (see engine inspection) -- do NOT cast to .half().
-    bulk_cuda = service._preprocess_stage(fresh_bulk_batches(), bulk_user_params)
-    preprocessed_bt = bulk_cuda.view(
-        batch_size, frames, *bulk_cuda.shape[1:]
-    ).contiguous()
+    # stage by replicating one tick's preprocessed frames across the temporal
+    # axis. The TRT model's compute is independent of pixel values, so timing
+    # is identical to production (where T frames in the window are distinct).
+    # Engine I/O is FP32 -- do NOT cast to .half().
+    _single_tick = service._preprocess_stage(fresh_batches(), user_params)  # (B, 3, H, W)
+    preprocessed_bt = (
+        _single_tick.unsqueeze(1).expand(-1, frames, -1, -1, -1).contiguous()
+    )                                                                       # (B, T, 3, H, W)
 
-    # --- Per-stream synthetic prior-tick history for the half_cycle's
-    # mean-pool step. Production fills each stream's frame_buffer over many
-    # ticks (TEMPORAL_SIZE entries, one per tick at prediction_size=1). Here
-    # the timed loop only runs one tick of inference per iter, so we pre-fill
-    # (TEMPORAL_SIZE - prediction_size) older slots once -- the timed region
-    # only pays the per-tick stack + mean cost, matching what
-    # ``_postprocess_stage`` does per tick once the buffer is full.
-    _prefill_embs = service._inference_stage(preprocessed_bt)        # (B, T, 1024)
-    _hist_slot = _prefill_embs[:, -1:, :]                            # (B, 1, 1024)
-    _hist_len = TEMPORAL_SIZE - service.prediction_size
-    _hist = _hist_slot.expand(-1, _hist_len, -1).contiguous()        # (B, hist_len, 1024)
-    prefilled_bufs: list[list[torch.Tensor]] = [
-        list(_hist[i].unbind(0)) for i in range(batch_size)
-    ]
-    pred_k = service.prediction_size
+    # --- Mirror of FTPEService._postprocess_stage up to (B, 1024) video_emb,
+    # omitting the text-side work (L2 norm + per-class cos-sim + alarm event
+    # manager). Reuses ``service.gather_frame_buffers`` and
+    # ``service.frame_buffers``, so each call advances the per-stream state
+    # by exactly one tick -- the same advance full_cycle's ``_detect`` causes.
+    def _postprocess_to_video_emb(processed_batches, stream_ids):
+        for stream_id, batch in zip(stream_ids, processed_batches):
+            service.gather_frame_buffers[stream_id].append(batch)
+            service._unconsumed_frames[stream_id] += 1
 
-    # --- Prime the FTPEService temporal buffer so each measured full_cycle
-    # tick actually produces a prediction.
+        encode_stream_ids = []
+        encode_tensors = []
+        for stream_id in stream_ids:
+            gbuf = service.gather_frame_buffers[stream_id]
+            if (
+                len(gbuf) == service.window_size
+                and service._unconsumed_frames[stream_id] >= service.stride
+            ):
+                encode_tensors.append(torch.stack(list(gbuf)))            # (W, C, H, W)
+                service._unconsumed_frames[stream_id] -= service.stride
+                encode_stream_ids.append(stream_id)
+
+        if encode_stream_ids:
+            encode_input = torch.stack(encode_tensors)                    # (B_enc, W, ...)
+            embeddings = service._inference_stage(encode_input)            # (B_enc, W, 1024)
+            for sid, emb in zip(encode_stream_ids, embeddings):
+                new_embs = emb[-service.prediction_size:]
+                service.frame_buffers[sid].extend(new_embs.unbind(0))
+                if len(service.frame_buffers[sid]) > TEMPORAL_SIZE:
+                    del service.frame_buffers[sid][1]
+
+        video_embeddings = []
+        for stream_id in stream_ids:
+            buf = service.frame_buffers[stream_id]
+            if len(buf) >= TEMPORAL_SIZE:
+                stacked = torch.stack(list(buf))                          # (TEMPORAL_SIZE, 1024)
+                video_embeddings.append(stacked.mean(dim=0))              # (1024,)
+
+        if not video_embeddings:
+            return None
+        return torch.stack(video_embeddings)                              # (B, 1024)
+
+    # --- Prime the FTPEService temporal buffer so each measured tick (full
+    # OR half) actually produces a video embedding.
     buffer_warmup = TEMPORAL_SIZE + service.window_size + 2
     for _ in range(buffer_warmup):
         service._detect(
             batches=fresh_batches(), stream_ids=stream_ids, user_params=user_params,
         )
 
-    # Additional warmup for cache/JIT. Cover all three measured paths.
+    # Additional warmup for cache/JIT. ``_detect`` covers half_cycle's
+    # vision-side path (preprocess + buffer + model + frame_buffer + mean),
+    # so full_cycle warmup is enough for both. The inference-only stage gets
+    # its own warmup hit.
     for _ in range(warmup_iters):
         service._detect(
             batches=fresh_batches(), stream_ids=stream_ids, user_params=user_params,
         )
-        _ = service._preprocess_stage(fresh_bulk_batches(), bulk_user_params)
-        emb_w = service._inference_stage(preprocessed_bt)
-        new_w = emb_w[:, -pred_k:, :]
-        for i in range(batch_size):
-            _ = torch.stack(prefilled_bufs[i] + list(new_w[i].unbind(0))).mean(dim=0)
+        _ = service._inference_stage(preprocessed_bt)
     torch.cuda.synchronize()
 
     samples = {"full_cycle": [], "half_cycle": [], "inference": []}
     per_iter_temp: list[float | None] = []
     t_start = query_gpu_temp_c()
 
-    in_mem_bulk = fresh_bulk_batches()
-
     for _ in range(measure_iters):
-        # full_cycle: disk read -> _detect (preprocess + buffer + encode +
-        # decide). Buffer is already primed so every call yields a decision.
+        # full_cycle: one production tick. disk read -> _detect (preprocess
+        # + gather/frame buffers + model + per-stream mean + L2 norm + per-
+        # category cos-sim vs text features + alarm event manager). Both
+        # buffers are primed so every call yields an alarm decision.
         def _full():
             batches = [load_image_ndarray(image_path) for _ in range(batch_size)]
             return service._detect(
@@ -278,29 +304,19 @@ def benchmark(
         _, dt = time_call(_full)
         samples["full_cycle"].append(dt * 1000.0)
 
-        # half_cycle: in-memory B*T frames -> _preprocess_stage (cv_bgr2rgb +
-        # ROI + preprocess_image) -> _inference_stage (B,T,1024) -> per-stream
-        # mean-pool over a TEMPORAL_SIZE buffer = (B, 1024) video embeddings.
-        # The (TEMPORAL_SIZE - prediction_size) older buffer slots are pre-
-        # filled outside the timed region; the timed iter just appends this
-        # tick's last `prediction_size` rows and stacks+means per stream,
-        # matching the per-tick cost ``_postprocess_stage`` pays once the
-        # buffer is full.
+        # half_cycle: same tick as full_cycle MINUS the text-side work.
+        # disk read -> _preprocess_stage(B) -> postprocess up to per-stream
+        # mean-pool = (B, 1024) video embeddings. Strictly equal to one
+        # full_cycle tick minus L2 norm + cos-sim + alarm, so by construction
+        # half_cycle <= full_cycle.
         def _half():
-            bulk_now = [b.copy() for b in in_mem_bulk]
-            x = service._preprocess_stage(bulk_now, bulk_user_params)
-            x = x.view(batch_size, frames, *x.shape[1:]).contiguous()
-            emb = service._inference_stage(x)                  # (B, T, 1024)
-            new_per_stream = emb[:, -pred_k:, :]               # (B, K, 1024)
-            video_embs = []
-            for i in range(batch_size):
-                buf = prefilled_bufs[i] + list(new_per_stream[i].unbind(0))
-                video_embs.append(torch.stack(buf).mean(dim=0))
-            return torch.stack(video_embs)                     # (B, 1024)
+            batches = [load_image_ndarray(image_path) for _ in range(batch_size)]
+            x = service._preprocess_stage(batches, user_params)
+            return _postprocess_to_video_emb(x, stream_ids)
         _, dt = time_call(_half)
         samples["half_cycle"].append(dt * 1000.0)
 
-        # inference: preprocessed CUDA tensor -> inference (stops at img emb).
+        # inference: pre-cooked CUDA tensor -> model only.
         _, dt = time_call(lambda: service._inference_stage(preprocessed_bt))
         samples["inference"].append(dt * 1000.0)
 
@@ -310,12 +326,12 @@ def benchmark(
     temps = [t for t in per_iter_temp if t is not None]
 
     stage_stats = {k: stats(v) for k, v in samples.items()}
-    # Unit: frames encoded per second.
-    #   - half_cycle / inference: encode (B*T) frames per call.
-    #   - full_cycle: stride=1 with window_size=T means each tick re-encodes
-    #     a (B, T) window, i.e. B*T frames per tick.
-    # So all three stages share the same work unit and are directly comparable.
-    # Production input rate is reported separately as `full_cycle_streams_per_s`.
+    # Unit: frames encoded per second (B*T per tick / per call).
+    #   - full_cycle and half_cycle: stride=1 with window_size=T means each
+    #     tick re-encodes a (B, T) window, i.e. B*T frames per tick.
+    #   - inference: one call encodes a (B, T) tensor, i.e. B*T frames.
+    # All three are directly comparable. Per-tick *input* rate (production
+    # streams per second) is reported separately for the tick-based stages.
     total_frames = batch_size * frames
     throughput = {
         f"{k}_imgs_per_s": round(total_frames * 1000.0 / stage_stats[k]["mean_ms"], 2)
@@ -323,6 +339,9 @@ def benchmark(
     }
     throughput["full_cycle_streams_per_s"] = round(
         batch_size * 1000.0 / stage_stats["full_cycle"]["mean_ms"], 2
+    )
+    throughput["half_cycle_streams_per_s"] = round(
+        batch_size * 1000.0 / stage_stats["half_cycle"]["mean_ms"], 2
     )
 
     iterations = {

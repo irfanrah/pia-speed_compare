@@ -84,21 +84,22 @@ full_cycle : disk read → _preprocess_stage(B)
                        → per-stream frame_buffer (TEMPORAL_SIZE=8)
                        → mean-pool                  → (B, 1024)
                        → L2 norm → per-class cos-sim → alarm
-half_cycle : in-mem B*T ndarrays → _preprocess_stage(B*T)
-                                 → view (B, T, 3, H, W)
-                                 → TRT model         → (B, T, 1024)
-                                 → per-stream stack TEMPORAL_SIZE entries
-                                   (TEMPORAL_SIZE - prediction_size of them
-                                   are pre-filled outside the timed region)
-                                 → mean-pool         → (B, 1024)        ← stops here
+half_cycle : disk read → _preprocess_stage(B)
+                       → per-stream gather buffer (window_size=T)
+                       → TRT model                  → (B, T, 1024)
+                       → per-stream frame_buffer (TEMPORAL_SIZE=8)
+                       → mean-pool                  → (B, 1024)         ← stops here
 inference  : pre-cooked (B, T, 3, H, W) tensor → TRT model → (B, T, 1024)
 ```
 
-The half_cycle is **synthetic**: production never preprocesses B*T frames in
-a single call. The bench bundles them so the timed iter pays one tick's
-encode + one tick's mean-pool without having to simulate the gather buffer
-filling across many ticks. The pre-filled history outside the timed region
-keeps the mean-pool's `stack(...)` cost realistic.
+Both `full_cycle` and `half_cycle` are **one production tick** — they share
+the same `service.gather_frame_buffers` and `service.frame_buffers` state,
+which is primed once during warmup and advanced by one tick per timed call.
+The only difference between the two stages is the text-side block at the
+end of `full_cycle`, so `half_cycle <= full_cycle` holds **by construction**.
+The earlier "synthetic B×T bulk preprocess" definition was scrapped: it
+inflated half_cycle's preprocess work T× relative to a real tick and produced
+the nonsensical `half > full` ordering at `T > 1`.
 
 ## Throughput unit
 
@@ -112,9 +113,10 @@ per second** = `B * T * 1000 / mean_ms`.
   — same as half_cycle / inference. The numbers are directly comparable.
 
 The **production input rate** (unique frames ingested per second) is
-reported separately as `throughput.full_cycle_streams_per_s = B * 1000 /
-mean_ms` for FT_PE only. PE has no separate streams-per-second key because
-it equals `full_cycle_imgs_per_s`.
+reported separately as `throughput.full_cycle_streams_per_s` and
+`throughput.half_cycle_streams_per_s` (= `B * 1000 / mean_ms`) for FT_PE
+only. PE has no separate streams-per-second key because it equals
+`*_imgs_per_s`.
 
 ## ROI / retEvent shape
 
