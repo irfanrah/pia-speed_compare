@@ -103,35 +103,13 @@ fi
 
 PE_INT8_ENGINE_DIR="$(dirname "$PE_INT8_ENGINE")"
 
-# Expose PE vendor + pip-installed CUDA libs the test_int8_random script needs.
-# (TRT inference normally doesn't need cuDNN, but `import tensorrt` can pull
-# in cuBLAS/CUDA-runtime; if the script ever hits a missing-lib failure on a
-# host where torch's bundled libs aren't on LD_LIBRARY_PATH, the discovery
-# below picks them up the same way run_int8_pipeline.sh does.)
-_NV_LIBS="$("$PYTHON" -c '
-import os, importlib, site
-libs=[]
-roots = []
-for sp in site.getsitepackages() + [site.getusersitepackages()]:
-    n = os.path.join(sp, "nvidia")
-    if os.path.isdir(n) and n not in roots: roots.append(n)
-for name in ["cudnn","cublas","cuda_runtime","cufft","curand","cusolver","cusparse","nccl","nvjitlink","cuda_cupti","cuda_nvrtc"]:
-    p = None
-    try:
-        m = importlib.import_module(f"nvidia.{name}")
-        if getattr(m, "__file__", None):
-            p = os.path.join(os.path.dirname(m.__file__), "lib")
-    except Exception: pass
-    if not p or not os.path.isdir(p):
-        for r in roots:
-            cand = os.path.join(r, name, "lib")
-            if os.path.isdir(cand): p = cand; break
-    if p and os.path.isdir(p) and p not in libs: libs.append(p)
-print(":".join(libs))
-' 2>/dev/null || true)"
-if [ -n "$_NV_LIBS" ]; then
-    export LD_LIBRARY_PATH="$_NV_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-fi
+# NOTE: we deliberately do NOT prepend pip's nvidia-cudnn-cu12 dir to
+# LD_LIBRARY_PATH here (unlike run_int8_pipeline.sh, which does it for ORT).
+# torch already bundles its own libcudnn under ``torch/lib/``; forcing a
+# different libcudnn earlier on LD_LIBRARY_PATH triggers a version mismatch
+# inside ``nn.Conv2d``'s cuDNN init (CUDNN_STATUS_NOT_INITIALIZED). The cos
+# pass uses only torch + TensorRT — both find their own CUDA libs without
+# manual help.
 
 echo
 echo "[PE_INT8] === random-image cos/MSE vs PT BF16 ==="
