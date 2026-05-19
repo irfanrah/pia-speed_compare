@@ -20,11 +20,15 @@ pipeline.
 Stage totals are derived by summing the relevant step times per iteration:
 
     full_cycle = preprocess + model + postprocess + alarm_gate
-    half_cycle = preprocess + model + postprocess        (= full - alarm_gate)
+    half_cycle = preprocess + model
+                   (stops at the pooled video embedding -- no text-side work.
+                    `postprocess` here IS the text-similarity calculation, so
+                    "post-processing minus text-sim" reduces to nothing.)
     inference  = model
 
 This guarantees `full >= half >= inference` per iteration -- no variance
 artefacts where a stage came out larger than its superset.
+`full - half` isolates the entire text-side block (cos-sim + alarm).
 
 Step boundaries
 ---------------
@@ -313,7 +317,7 @@ def benchmark(
             for i in range(n)
         ],
         "half_cycle": [
-            steps["preprocess"][i] + steps["model"][i] + steps["postprocess"][i]
+            steps["preprocess"][i] + steps["model"][i]
             for i in range(n)
         ],
         "inference": list(steps["model"]),
@@ -467,7 +471,7 @@ def main() -> int:
               f"std={s['std_ms']:>7.3f}  p95={s['p95_ms']:>8.3f} ms")
     print()
     print("  stages (derived: full = pre+model+post+alarm; "
-          "half = full-alarm; inference = model):")
+          "half = pre+model; inference = model):")
     for stage, s in result["stages"].items():
         print(f"    {stage:<12}  mean={s['mean_ms']:>8.3f} ms  "
               f"std={s['std_ms']:>7.3f}  "
