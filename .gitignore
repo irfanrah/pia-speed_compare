@@ -17,6 +17,9 @@ assets/model/*.png
 
 assets/QAT
 
+# HF cache (PT checkpoints + datasets downloaded by run_int8_pipeline.sh)
+src/FTPE_INT8/.hf_cache/
+
 # Benchmark runtime artifacts
 logs/
 

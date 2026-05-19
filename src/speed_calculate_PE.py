@@ -11,6 +11,12 @@ Stage boundary convention (shared with the FT_PE bench):
     * The moment any text-side work runs (cos-sim against text features,
       top-K, alarm event manager), the timing is no longer ``half_cycle``
       -- that work lives only in ``full_cycle``.
+    * ``full_cycle`` and ``half_cycle`` are measured from the **same**
+      preprocess+inference run inside each iter: the timer is sampled at
+      the half boundary, the run then continues into postprocess, and the
+      timer is sampled again for full. This guarantees
+      ``full_cycle >= half_cycle`` by construction and isolates the
+      text-side cost (``full - half``) from per-iter jitter.
 
     full_cycle:           _preprocess_stage -> _inference_stage
                           -> _postprocess_stage
@@ -30,17 +36,22 @@ Stage boundary convention (shared with the FT_PE bench):
                           the dot product -- no top-K, no process_category,
                           no check_alarm_duration.
 
-The timed regions for ``full_cycle`` and ``half_cycle`` BOTH start at
-``_preprocess_stage`` with batches drawn from a **pre-generated input
-pool** (one big list of unique random (1080, 1920, 3) uint8 ndarrays
-materialized once at bench start, sized to cover every B-batch consumer
-in setup + warmup + measure loop). ``fresh_batches()`` returns the next
-B slots from the pool, .copy()-ing so cv_bgr2rgb_batch can mutate the
-consumer without trashing the source. Each fresh_batches() call advances
-the index, so every iter / stage sees disjoint random data. Input-prep
-cost is reported separately as ``input_gen_and_load`` (timed as a fresh
-``gen_random_frame() × B``, not from the pool). The ``--image`` CLI flag
-is preserved for backwards compat but ignored.
+The timed region starts at ``_preprocess_stage`` with batches drawn from
+a **pre-generated input pool** (one big list of unique random
+(1080, 1920, 3) uint8 ndarrays materialized once at bench start, sized to
+cover every B-batch consumer in warmup + measure loop). ``fresh_batches()``
+returns the next B slots from the pool, .copy()-ing so cv_bgr2rgb_batch
+can mutate the consumer without trashing the source. Each fresh_batches()
+call advances the index, so every iter sees disjoint random data.
+``full_cycle``, ``half_cycle``, ``inference``, and ``cos_sim`` all share
+the **same** fresh_batches() call within an iter: one preprocess+inference
+run feeds the shared full/half snapshots, then ``inference`` re-times the
+model call on the same ``x`` tensor and ``cos_sim`` re-times the matmul
+on the stream_vector_queues just populated by that run. Input-prep cost
+is reported separately as ``input_gen_and_load`` (timed as a fresh
+``gen_random_frame() × B``, NOT from the pool -- it deliberately measures
+the cost of producing new data). The ``--image`` CLI flag is preserved
+for backwards compat but ignored.
 
 GPU temperature is polled per iter via NVML when ``pynvml`` is installed,
 falling back to nvidia-smi otherwise.
@@ -54,6 +65,7 @@ import os
 import statistics
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -84,6 +96,7 @@ os.environ["MODEL_PERCEPTION_ENCODER_TXT_FEATURE_PATH"] = str(_pre_args.text_fea
 from queue import Queue  # noqa: E402
 
 from pia.ai.tasks.T2VRet.models.PE.utils.complexity_check import (  # noqa: E402
+    cuda_sync,
     time_call,
     get_gpu_stats_nvml,
 )
@@ -198,9 +211,9 @@ def benchmark(
 
     # --- Pre-generated input pool ---------------------------------------
     # Total B-batches consumed in this bench run:
-    #   1                          preprocessed-tensor setup
     #   warmup_iters               warmup _detect chain (1 batch / iter)
-    #   2 * measure_iters          measure loop (full + half each iter)
+    #   measure_iters              measure loop (full/half/inference/cos_sim
+    #                              all share one fresh_batches() per iter)
     # We materialize ONE big pool of unique (1080, 1920, 3) uint8 ndarrays
     # up front (size = n_batches * B frames). fresh_batches() pulls the
     # next B from the pool, .copy()-ing so cv_bgr2rgb_batch can mutate
@@ -208,7 +221,7 @@ def benchmark(
     # call advances the pool index, so no two consumers see the same data.
     # PE has no temporal-buffer warmup so pool sizing here doesn't depend
     # on T (T=1 implicit).
-    n_pool_batches = 1 + warmup_iters + 2 * measure_iters
+    n_pool_batches = warmup_iters + measure_iters
     _pool_rng = np.random.default_rng()
     pool: list[np.ndarray] = [
         _pool_rng.integers(0, 256, size=_FRAME_HW, dtype=np.uint8)
@@ -231,10 +244,6 @@ def benchmark(
         pool_idx[0] = i + batch_size
         return batch
 
-    # One preprocessed CUDA tensor reused across iters for the inference-only
-    # stage.
-    preprocessed = service._preprocess_stage(fresh_batches(), user_params)
-
     # Warmup covers the full _detect chain so the first measured full_cycle
     # iter doesn't pay the postprocess (cos-sim + top-K + alarm event manager)
     # cold-cache hit.
@@ -256,37 +265,29 @@ def benchmark(
     t_start = query_gpu_temp_c()
 
     for _ in range(measure_iters):
-        # full_cycle: _preprocess_stage -> _inference_stage -> _postprocess_stage.
-        # Input ndarrays come from the pre-generated pool via fresh_batches()
-        # -- each call advances the pool index, so every measure iter (and
-        # each of full/half within it) sees a different B-slice. The timed
-        # region starts at preprocess so the encoder + service cost is
-        # isolated from the input-prep cost (which lives in its own
-        # ``input_gen_and_load`` stage). End-to-end: also runs the cos-sim
-        # + top-K + alarm event manager.
-        def _full():
-            batches = fresh_batches()
-            x = service._preprocess_stage(batches, user_params)
-            v = service._inference_stage(x)
-            return service._postprocess_stage(v, batches, stream_ids, user_params)
-        _, dt = time_call(_full)
-        samples["full_cycle"].append(dt * 1000.0)
+        # Shared full_cycle + half_cycle: one preprocess+inference per iter,
+        # snapshot at the half boundary, continue into postprocess, snapshot
+        # again for full. Guarantees full_cycle >= half_cycle by construction
+        # and isolates the text-side cost (full - half) from per-iter jitter.
+        # PE has TEMPORAL_SIZE = 1, so the per-image visual vector IS the
+        # per-stream video embedding.
+        cuda_sync()
+        t0 = time.perf_counter()
+        batches = fresh_batches()
+        x = service._preprocess_stage(batches, user_params)
+        v = service._inference_stage(x)
+        cuda_sync()
+        t_half = time.perf_counter()
+        _ = service._postprocess_stage(v, batches, stream_ids, user_params)
+        cuda_sync()
+        t_full = time.perf_counter()
+        samples["full_cycle"].append((t_full - t0) * 1000.0)
+        samples["half_cycle"].append((t_half - t0) * 1000.0)
 
-        # half_cycle: _preprocess_stage -> _inference_stage (stops at video
-        # emb (B, 1024); no text-side work). PE has TEMPORAL_SIZE = 1, so the
-        # per-image visual vector IS the per-stream video embedding. Same
-        # pool-backed fresh_batches() start point as full_cycle so the two
-        # are directly comparable; the only difference is the text-side
-        # block.
-        def _half():
-            batches = fresh_batches()
-            x = service._preprocess_stage(batches, user_params)
-            return service._inference_stage(x)
-        _, dt = time_call(_half)
-        samples["half_cycle"].append(dt * 1000.0)
-
-        # inference: preprocessed CUDA tensor -> inference (stops at video emb).
-        _, dt = time_call(lambda: service._inference_stage(preprocessed))
+        # inference: re-time _inference_stage on the SAME preprocessed tensor
+        # ``x`` produced by this iter's shared run (no preprocess cost in this
+        # measurement, just the model call). Stops at video emb (B, 1024).
+        _, dt = time_call(lambda: service._inference_stage(x))
         samples["inference"].append(dt * 1000.0)
 
         # input_gen_and_load: isolated cost of producing B (1080, 1920, 3)
@@ -303,8 +304,9 @@ def benchmark(
         # PEEventManager.update but stops right after the dot product --
         # no top-K (_decide_top_category_opt), no process_category, no
         # check_alarm_duration. stream_vector_queues are populated by the
-        # earlier full_cycle call in this iter, so each deque has at least
-        # one real visual_vector.
+        # SHARED full+half run earlier in this iter (via _postprocess_stage),
+        # so cos_sim implicitly uses the same fresh_batches() input as
+        # full/half/inference.
         aem = service.alarm_event_manager
         gpu_vectors_T = aem.gpu_vectors.T
         def _cos_sim():

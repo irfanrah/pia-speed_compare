@@ -10,8 +10,12 @@ Stage boundary convention (shared with the PE bench):
     * ``full_cycle`` = same start point (preprocess) but continues through
       the text side: L2 norm + per-class cos-sim against text features +
       alarm event manager.
-    * So ``half_cycle <= full_cycle`` by construction (the only thing
-      differing is the text-side block at the tail).
+    * ``full_cycle`` and ``half_cycle`` are sampled from the **same**
+      shared run inside each iter: the timer is snapshotted at the half
+      boundary, the run continues into the text-side block, and the timer
+      is snapshotted again for full. So ``half_cycle <= full_cycle`` by
+      construction and ``full - half`` is exactly the text-side cost,
+      free of preprocess+inference jitter.
 
     full_cycle:           _preprocess_stage -> _postprocess_stage
                           (end-to-end per-tick from preprocess: gather
@@ -34,24 +38,27 @@ Stage boundary convention (shared with the PE bench):
                           video_embs, no `>` comparison + .cpu().tolist()
                           sync, no alarm_event_manager.update.
 
-The timed regions for ``full_cycle`` and ``half_cycle`` BOTH start at
-``_preprocess_stage`` with batches drawn from a **pre-generated input
-pool** (one big list of unique random (1080, 1920, 3) uint8 ndarrays
-materialized once at bench start, sized to cover every B-batch consumer:
-preprocessed_bt setup + _half_warm + buffer_warmup + cache warmup +
-measure loop's full/half pair). ``fresh_batches()`` returns the next B
-slots from the pool, .copy()-ing so cv_bgr2rgb_batch can mutate the
-consumer without trashing the source. Each fresh_batches() call advances
-the pool index, so every iter / stage sees disjoint random data.
+The timed region starts at ``_preprocess_stage`` with batches drawn from
+a **pre-generated input pool** (one big list of unique random
+(1080, 1920, 3) uint8 ndarrays materialized once at bench start, sized to
+cover every B-batch consumer: buffer_warmup + cache warmup + measure
+loop). ``fresh_batches()`` returns the next B slots from the pool,
+.copy()-ing so cv_bgr2rgb_batch can mutate the consumer without trashing
+the source. Each fresh_batches() call advances the pool index, so every
+iter sees disjoint random data. ``full_cycle``, ``half_cycle``,
+``inference``, and ``cos_sim`` all share the **same** fresh_batches()
+call within an iter: one preprocess+model+mean run feeds the shared
+full/half snapshots, then ``inference`` re-times the model call on a
+(B, T) tensor built from the same ``x`` and ``cos_sim`` re-times the
+matmul on the same ``vis_vectors`` produced by the shared run.
 Input-prep cost is reported separately as ``input_gen_and_load`` (timed
-as a fresh ``gen_random_frame() × B``, not from the pool). The
-``--image`` CLI flag is preserved for backwards compat but ignored.
+as a fresh ``gen_random_frame() × B``, NOT from the pool -- it
+deliberately measures the cost of producing new data). The ``--image``
+CLI flag is preserved for backwards compat but ignored.
 
-``full_cycle`` and ``half_cycle`` both reuse ``service.gather_frame_buffers``
-and ``service.frame_buffers``, so each call advances the per-stream state
-by exactly one tick. The timed loop runs full / half / inference / input_gen
-/ cos_sim within each iter; only full and half advance the service state
-(the buffer stays full across all advances).
+``full_cycle``/``half_cycle`` reuse ``service.gather_frame_buffers`` and
+``service.frame_buffers``, advancing the per-stream state by exactly one
+tick per measure iter (one shared run, not two).
 
 Throughput is reported in **frames encoded per second**
 (``*_imgs_per_s = B * T * 1000 / mean_ms``). Production input rate (streams
@@ -72,6 +79,7 @@ import os
 import statistics
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -107,6 +115,7 @@ os.environ.setdefault("FT_PE_MODE", "8fps")
 from queue import Queue  # noqa: E402
 
 from pia.ai.tasks.T2VRet.models.PE.utils.complexity_check import (  # noqa: E402
+    cuda_sync,
     time_call,
     get_gpu_stats_nvml,
 )
@@ -252,15 +261,14 @@ def benchmark(
 
     # --- Pre-generated input pool ---------------------------------------
     # Total B-batches consumed by FT_PE in this bench run:
-    #   1                            preprocessed_bt setup (single_tick)
-    #   1                            _half_warm setup (prime cos_sim input)
     #   (TEMPORAL_SIZE + T + 2)      buffer_warmup ticks of _detect
     #   warmup_iters                 cache/JIT warmup _detect calls
-    #   2 * measure_iters            measure loop (full + half each iter)
+    #   measure_iters                measure loop (full/half/inference/cos_sim
+    #                                all share one fresh_batches() per iter)
     # Pool sized to cover all of these as unique (1080, 1920, 3) uint8
     # ndarrays so every B-batch consumer in the bench gets disjoint data.
     buffer_warmup = TEMPORAL_SIZE + frames + 2
-    n_pool_batches = 2 + buffer_warmup + warmup_iters + 2 * measure_iters
+    n_pool_batches = buffer_warmup + warmup_iters + measure_iters
     _pool_rng = np.random.default_rng()
     pool: list[np.ndarray] = [
         _pool_rng.integers(0, 256, size=_FRAME_HW, dtype=np.uint8)
@@ -284,21 +292,13 @@ def benchmark(
         pool_idx[0] = i + batch_size
         return batch
 
-    # --- Build a preprocessed (B, T, C, H, W) tensor for the inference-only
-    # stage by replicating one tick's preprocessed frames across the temporal
-    # axis. The TRT model's compute is independent of pixel values, so timing
-    # is identical to production (where T frames in the window are distinct).
-    # Engine I/O is FP32 -- do NOT cast to .half().
-    _single_tick = service._preprocess_stage(fresh_batches(), user_params)  # (B, 3, H, W)
-    preprocessed_bt = (
-        _single_tick.unsqueeze(1).expand(-1, frames, -1, -1, -1).contiguous()
-    )                                                                       # (B, T, 3, H, W)
-
     # --- Mirror of FTPEService._postprocess_stage up to (B, 1024) video_emb,
     # omitting the text-side work (L2 norm + per-class cos-sim + alarm event
     # manager). Reuses ``service.gather_frame_buffers`` and
     # ``service.frame_buffers``, so each call advances the per-stream state
-    # by exactly one tick -- the same advance full_cycle's ``_detect`` causes.
+    # by exactly one tick -- the same advance ``_postprocess_stage`` causes.
+    # Returns (vis_vectors, ready_stream_ids) so the text-side helper can
+    # pick up where this leaves off.
     def _postprocess_to_video_emb(processed_batches, stream_ids):
         for stream_id, batch in zip(stream_ids, processed_batches):
             service.gather_frame_buffers[stream_id].append(batch)
@@ -325,16 +325,51 @@ def benchmark(
                 if len(service.frame_buffers[sid]) > TEMPORAL_SIZE:
                     del service.frame_buffers[sid][1]
 
+        ready_stream_ids = []
         video_embeddings = []
         for stream_id in stream_ids:
             buf = service.frame_buffers[stream_id]
             if len(buf) >= TEMPORAL_SIZE:
                 stacked = torch.stack(list(buf))                          # (TEMPORAL_SIZE, 1024)
                 video_embeddings.append(stacked.mean(dim=0))              # (1024,)
+                ready_stream_ids.append(stream_id)
 
         if not video_embeddings:
-            return None
-        return torch.stack(video_embeddings)                              # (B, 1024)
+            return None, []
+        return torch.stack(video_embeddings), ready_stream_ids            # (B_ready, 1024)
+
+    # --- Mirror of the text-side tail of ``FTPEService._postprocess_stage``
+    # starting from L2-norming ``vis_vectors``: per-class cos-sim against
+    # text features + ``>`` + ``.cpu().tolist()`` sync + alarm event manager
+    # update. Matches production cost exactly (the bench leaves
+    # ``service.debug = False``, so the debug branch is skipped there too).
+    def _postprocess_text_side(vis_vectors, ready_stream_ids, batches):
+        user_param_map = {sid: param for sid, param in zip(stream_ids, user_params)}
+        ready_set = set(ready_stream_ids)
+        latest_frames = {sid: f for sid, f in zip(stream_ids, batches) if sid in ready_set}
+
+        vis_vectors = vis_vectors / vis_vectors.norm(dim=-1, keepdim=True)
+
+        category_preds: dict[str, list[bool]] = {}
+        for class_name in ABNORMAL_CLASS_NAMES:
+            txt_vec = service.category_txt_vectors.get(class_name)
+            normal_vec = service.category_normal_vectors.get(class_name)
+            if txt_vec is None or normal_vec is None:
+                continue
+            sim_abn_max = (vis_vectors @ txt_vec).max(dim=1).values
+            sim_nrm_max = (vis_vectors @ normal_vec).max(dim=1).values
+            category_preds[class_name] = (sim_abn_max > sim_nrm_max).detach().cpu().tolist()
+
+        predicts_per_stream = [
+            {cls: category_preds[cls][i] for cls in category_preds}
+            for i in range(len(ready_stream_ids))
+        ]
+        user_param_list = [user_param_map[sid] for sid in ready_stream_ids]
+        _ = [latest_frames[sid] for sid in ready_stream_ids]  # mirrors prod build
+
+        return service.alarm_event_manager.update(
+            predicts_per_stream, ready_stream_ids, user_param_list
+        )
 
     # --- cos-sim dot-product helper. Times JUST the per-class cos-sim
     # matmul (vis @ cat_txt[c] and vis @ cat_normal[c]) followed by .max(1)
@@ -362,15 +397,15 @@ def benchmark(
             batches=fresh_batches(), stream_ids=stream_ids, user_params=user_params,
         )
 
-    # Additional warmup for cache/JIT. ``_detect`` covers half_cycle's
-    # vision-side path (preprocess + buffer + model + frame_buffer + mean),
-    # so full_cycle warmup is enough for both. The inference-only stage gets
-    # its own warmup hit.
+    # Additional warmup for cache/JIT. ``_detect`` covers the full vision +
+    # text-side path (preprocess + buffer + model + frame_buffer + mean +
+    # L2 + cos-sim + alarm), so it warms every stage the measure loop hits
+    # -- including the inference-only stage, since _detect itself calls
+    # _inference_stage internally on a same-shaped (B, T, C, H, W) tensor.
     for _ in range(warmup_iters):
         service._detect(
             batches=fresh_batches(), stream_ids=stream_ids, user_params=user_params,
         )
-        _ = service._inference_stage(preprocessed_bt)
     torch.cuda.synchronize()
 
     samples = {
@@ -383,46 +418,37 @@ def benchmark(
     per_iter_temp: list[float | None] = []
     t_start = query_gpu_temp_c()
 
-    # Stash a (B, 1024) video_embeddings tensor for the cos_sim stage. The
-    # text-side block doesn't actually care about the values -- the matmul
-    # cost is independent of the input -- so we use one tick's video emb
-    # captured after warmup. ``half_cycle`` returns this same shape.
-    _half_warm = _postprocess_to_video_emb(
-        service._preprocess_stage(fresh_batches(), user_params), stream_ids,
-    )
-    if _half_warm is None:
-        raise RuntimeError("warmup didn't fill the frame_buffer; cannot prime cos_sim input")
-    fixed_video_embs = _half_warm.detach()
-
     for _ in range(measure_iters):
-        # full_cycle: one production tick of vision + text side. Input
-        # ndarrays come from the pre-generated pool via fresh_batches() --
-        # each call advances the pool index, so every measure iter (and
-        # each of full/half within it) sees a different B-slice. _detect
-        # runs _preprocess_stage + gather/frame buffer flow + model +
-        # per-stream mean + L2 norm + per-category cos-sim + alarm event
-        # manager. Both buffers are primed so every call yields a decision.
-        def _full():
-            batches = fresh_batches()
-            return service._detect(
-                batches=batches, stream_ids=stream_ids, user_params=user_params,
-            )
-        _, dt = time_call(_full)
-        samples["full_cycle"].append(dt * 1000.0)
+        # Shared full_cycle + half_cycle: one production tick of
+        # preprocess + gather/frame buffer + model + per-stream mean,
+        # snapshot at the half boundary, continue into the text-side
+        # block (L2 norm + per-class cos-sim + alarm event manager),
+        # snapshot again for full. Guarantees full_cycle >= half_cycle
+        # and isolates the text-side cost (full - half) from the
+        # vision-side jitter. State advances once per measure iter.
+        cuda_sync()
+        t0 = time.perf_counter()
+        batches = fresh_batches()
+        x = service._preprocess_stage(batches, user_params)
+        vis_vectors, ready_stream_ids = _postprocess_to_video_emb(x, stream_ids)
+        cuda_sync()
+        t_half = time.perf_counter()
+        if vis_vectors is not None:
+            _ = _postprocess_text_side(vis_vectors, ready_stream_ids, batches)
+        cuda_sync()
+        t_full = time.perf_counter()
+        samples["full_cycle"].append((t_full - t0) * 1000.0)
+        samples["half_cycle"].append((t_half - t0) * 1000.0)
 
-        # half_cycle: same pool-backed start point as full_cycle through
-        # _preprocess_stage, stops at the per-stream video embedding
-        # (B, 1024). Differs from full_cycle only in the text-side block,
-        # so by construction half_cycle <= full_cycle.
-        def _half():
-            batches = fresh_batches()
-            x = service._preprocess_stage(batches, user_params)
-            return _postprocess_to_video_emb(x, stream_ids)
-        _, dt = time_call(_half)
-        samples["half_cycle"].append(dt * 1000.0)
-
-        # inference: pre-cooked CUDA tensor -> model only.
-        _, dt = time_call(lambda: service._inference_stage(preprocessed_bt))
+        # inference: re-time _inference_stage on a (B, T, C, H, W) tensor
+        # built from THIS iter's preprocessed ``x`` (shape (B, C, H, W)),
+        # so the inference measurement uses the same fresh_batches() input
+        # as the shared full/half run. Construction (.contiguous()) happens
+        # outside time_call so its copy doesn't bleed into the timing.
+        preprocessed_bt_iter = (
+            x.unsqueeze(1).expand(-1, frames, -1, -1, -1).contiguous()
+        )                                                                   # (B, T, C, H, W)
+        _, dt = time_call(lambda: service._inference_stage(preprocessed_bt_iter))
         samples["inference"].append(dt * 1000.0)
 
         # input_gen_and_load: isolated cost of producing B (1080, 1920, 3)
@@ -436,9 +462,10 @@ def benchmark(
         # cos_sim: isolated cost of the per-class cos-sim matmul. JUST the
         # dot product (and the .max(1) reduction that immediately follows
         # inside _postprocess_stage) -- no L2 norm of video_embs, no `>`
-        # comparison, no alarm event manager. Uses a pre-stacked (B, 1024)
-        # video_embeddings tensor captured once after warmup.
-        _, dt = time_call(lambda: _cos_sim_dot(fixed_video_embs))
+        # comparison, no alarm event manager. Uses THIS iter's vis_vectors
+        # produced by the shared full+half run, so cos_sim is on the same
+        # fresh_batches() input as the rest.
+        _, dt = time_call(lambda: _cos_sim_dot(vis_vectors))
         samples["cos_sim"].append(dt * 1000.0)
 
         per_iter_temp.append(query_gpu_temp_c())

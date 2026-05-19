@@ -22,19 +22,24 @@ isolated from input materialization.
 
 | Stage | Scope | Output | Includes input prep? | Includes text side? |
 |---|---|---|---|---|
-| `inference` | pure encoder model compute on a pre-cooked CUDA tensor | per-frame img emb | no | no |
+| `inference` | pure encoder model compute on this iter's preprocessed CUDA tensor | per-frame img emb | no | no |
 | `half_cycle` | `_preprocess_stage` → … → latest video embedding | video emb `(B, 1024)` | no | **no** |
 | `full_cycle` | `_preprocess_stage` → end-to-end production tick | alarm decision | no | yes |
 | `input_gen_and_load` | isolated cost of producing B `(1080, 1920, 3)` uint8 ndarrays | B ndarrays | yes | no |
 | `cos_sim` | isolated cos-sim **dot product** vs text features | sim tensors | no | yes |
 
-`full_cycle` and `half_cycle` BOTH start at `_preprocess_stage` with batches
-drawn from a **pre-generated input pool** — a one-time-allocated list of
-unique random `(1080, 1920, 3)` uint8 ndarrays sized to cover every B-batch
-consumer in the bench (setup + warmup + buffer_warmup + 2 × measure_iters
-for full/half). `fresh_batches()` advances a pool index per call, so every
-iter and every stage within an iter sees disjoint random data — no shared
-template, no cached frame, no two consumers looking at the same pixels.
+`full_cycle`, `half_cycle`, `inference`, and `cos_sim` all share the
+**same** `fresh_batches()` call within each measure iter — one shared
+preprocess+model+mean run feeds the full/half snapshots (taken at the
+half boundary and again after the text-side block), and `inference` /
+`cos_sim` then re-time their respective sub-pieces on that run's
+intermediate tensors (`x` for inference, `vis_vectors` / populated
+`stream_vector_queues` for cos_sim). So per iter, the four GPU stages
+operate on the same pixel data. The batches themselves come from a
+**pre-generated input pool** — a one-time-allocated list of unique random
+`(1080, 1920, 3)` uint8 ndarrays sized to cover every B-batch consumer
+in the bench (warmup + buffer_warmup + 1 × measure_iters). Across iters,
+no two iters see the same draw.
 
 The rule of thumb: **the moment any text embedding (cos-sim vs text
 features, top-K, alarm event manager) is involved, the timing is no longer
@@ -45,10 +50,15 @@ is no disk I/O at any point in the bench.
 frames = K batches × B  (X GB)`):
 
 ```
-PE                : n_batches = 1 + warmup_iters + 2 × measure_iters
-FT_PE / FT_PE_INT8: n_batches = 2 + (TEMPORAL_SIZE + T + 2) + warmup_iters + 2 × measure_iters
+PE        : n_batches =     warmup_iters +     measure_iters
+FT_PE     : n_batches =     warmup_iters +     measure_iters + (TEMPORAL_SIZE + T + 2)
+FT_PE_INT8: n_batches = 2 + warmup_iters + 2 × measure_iters + (TEMPORAL_SIZE + T + 2)
 pool_bytes        = n_batches × B × (1080 × 1920 × 3) ≈ n_batches × B × 6.2 MB
 ```
+
+(FT_PE_INT8 hasn't been moved onto the shared-batch construction yet, so it
+still pulls two batches per measure iter — one for `full_cycle`, one for
+`half_cycle` — plus two setup ticks.)
 
 Typical: B=16, T=3, warmup=5, iters=25 → ~1 GB. At the upper end (B=128
 on the dynamic FT_PE_INT8 engine) it climbs into the multi-GB range — the
@@ -105,7 +115,7 @@ ordered work units; `✓` = included in that stage's timed region, `—` = not.
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
 │ fresh_batches()  (next B from pre-generated pool, .copy()-d)     │  ✓   │  ✓   │     —     │     —     │    —    │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
-│ pre-cooked (B, 3, H, W) CUDA tensor  (reused across iters)       │  —   │  —   │     ✓     │     —     │    —    │
+│ x = preprocessed (B, 3, H, W) tensor reused from this iter's run │  —   │  —   │     ✓     │     —     │    —    │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
 │ _preprocess_stage  (cv_bgr2rgb + ROI + resize / normalize)       │  ✓   │  ✓   │     —     │     —     │    —    │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
@@ -124,14 +134,21 @@ ordered work units; `✓` = included in that stage's timed region, `—` = not.
 ```
 
 Where each stage stops (the `⤴` arrow above):
+- `full_cycle` and `half_cycle` are measured from a **single** shared run
+  per iter: timer snapshotted at the half boundary, the run continues into
+  `_postprocess_stage`, timer snapshotted again for full. So per iter
+  `full_cycle ≥ half_cycle` by construction.
 - `half_cycle` returns the `(B, 1024)` visual vector straight out of
   `_inference_stage`. PE has `TEMPORAL_SIZE = 1`, so the per-image visual
   vector *is* the per-stream video embedding.
-- `inference` stops at the same point but starts from a pre-cooked CUDA
-  tensor (no preprocess).
-- `cos_sim` reads `service.stream_vector_queues` (already populated by the
-  earlier `full_cycle` call in this iter and by warmup) and times **only**
-  the per-stream `mean-pool + (mean @ self.gpu_vectors.T)`. The downstream
+- `inference` re-times `_inference_stage` on the same `x` tensor that
+  full/half just produced — so its input data is from the same
+  `fresh_batches()` call, but the preprocess cost is NOT in inference's
+  timed region.
+- `cos_sim` reads `service.stream_vector_queues` (just populated by the
+  shared full+half run earlier in this iter — and by warmup before iter 0)
+  and times **only** the per-stream
+  `mean-pool + (mean @ self.gpu_vectors.T)`. The downstream
   `_decide_top_category_opt` / `process_category` / `check_alarm_duration`
   are NOT in the timed call.
 - `input_gen_and_load` runs only the random-frame generation, nothing else.
@@ -150,7 +167,7 @@ tick triggers an encode.
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
 │ fresh_batches()  (next B from pre-generated pool, .copy()-d)     │  ✓   │  ✓   │     —     │     —     │    —    │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
-│ pre-cooked (B, T, 3, H, W) CUDA tensor  (reused across iters)    │  —   │  —   │     ✓     │     —     │    —    │
+│ (B, T, 3, H, W) tensor: x.unsqueeze(1).expand(...).contiguous()  │  —   │  —   │     ✓     │     —     │    —    │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
 │ _preprocess_stage  (cv_bgr2rgb + ROI + resize / normalize)       │  ✓   │  ✓   │     —     │     —     │    —    │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
@@ -177,25 +194,32 @@ tick triggers an encode.
 ```
 
 Where each stage stops (the `⤴` arrow above):
+- `full_cycle` and `half_cycle` are measured from a **single** shared run
+  per iter: preprocess + gather/frame buffer + model + per-stream mean →
+  snapshot for half → text-side block (L2 + cos-sim + alarm) → snapshot
+  for full. So per iter `full_cycle ≥ half_cycle` by construction.
 - `half_cycle` runs the full vision side via `_postprocess_to_video_emb`
   (mirror of `_postprocess_stage` truncated right after the per-stream
   mean-pool), and returns the stacked `(B, 1024)` video embeddings.
-- `inference` runs only `_inference_stage` on the pre-cooked
-  `(B, T, 3, H, W)` tensor — no preprocess, no gather buffer, no
-  frame buffer, no mean-pool.
-- `cos_sim` reads a pre-stacked `(B, 1024)` `video_embeddings` tensor
-  captured once after warmup, so it skips the entire vision side and
-  times **only** the per-class `(vis @ cat_txt[c]).max(1)` /
+- `inference` re-times `_inference_stage` on a `(B, T, 3, H, W)` tensor
+  built per-iter from the shared run's `x` via
+  `x.unsqueeze(1).expand(-1, T, -1, -1, -1).contiguous()`. The
+  `.contiguous()` copy runs outside `time_call`, so only the model call
+  is timed — no preprocess, no gather buffer, no frame buffer, no
+  mean-pool.
+- `cos_sim` reads the same `(B, 1024)` `vis_vectors` tensor the shared
+  run just produced, so it skips the entire vision side and times **only**
+  the per-class `(vis @ cat_txt[c]).max(1)` /
   `(vis @ cat_normal[c]).max(1)` dot-product loop. The L2 norm of
   video_embeddings, the `> sim_normal` comparison + `.cpu().tolist()`
   sync, and `alarm_event_manager.update` are NOT in the timed call.
 - `input_gen_and_load` runs only the random-frame generation, nothing else.
 
-`full_cycle` and `half_cycle` are both **one production tick** — they share
-the same `service.gather_frame_buffers` and `service.frame_buffers` state,
-which is primed once during warmup and advanced by one tick per timed
-call. By construction `half_cycle ≤ full_cycle` (the only difference is
-the text-side block at the tail).
+`full_cycle` and `half_cycle` are sampled from the same **one production
+tick** — they share `service.gather_frame_buffers` and
+`service.frame_buffers` state (primed once during warmup, advanced by one
+tick per measure iter). By construction `half_cycle ≤ full_cycle` (the
+only difference is the text-side block at the tail).
 
 ## Diff equations (subtraction games)
 
@@ -204,8 +228,10 @@ full        − half             ≈ cos_sim                (text-side cost)
 input_gen_and_load              = isolated input-prep cost  (random ndarray gen)
 ```
 
-By construction: `half_cycle ≤ full_cycle` (the only differing work is
-the text-side block; input prep is excluded from both).
+By construction: `half_cycle ≤ full_cycle` **per iter** (they're sampled
+from the same shared run — see `iterations.full_cycle_ms[i]` vs
+`iterations.half_cycle_ms[i]` in the result JSON). The only differing
+work is the text-side block; input prep is excluded from both.
 
 ## Throughput unit
 
@@ -253,8 +279,10 @@ first measured `full_cycle` iter doesn't pay the alarm-path cold-cache hit.
 FT_PE additionally primes `FTPEService`'s temporal buffer for
 `TEMPORAL_SIZE + window_size + 2` ticks so every measured `full_cycle` tick
 actually produces a video embedding (otherwise the first ~9 ticks return
-`None` while the buffer fills). The warmup loop then covers all three timed
-paths (`_detect`, bulk `_preprocess_stage`, inference + stack+mean).
+`None` while the buffer fills). The warmup loop then runs `_detect`,
+which internally calls `_inference_stage` on the same `(B_enc, T, ...)`
+shape the measure loop hits — so every timed stage's hot path is warmed
+by one common loop.
 
 ## A note on the existing results
 
