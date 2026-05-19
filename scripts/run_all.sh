@@ -1,33 +1,39 @@
 #!/usr/bin/env bash
-# Sweep PE and FT_PE benchmarks across the full B / T grid with cooldowns
-# between every run, so thermal throttling on the A4000 doesn't poison the
-# tail of each run or carry over to the next.
+# run_all.sh — sweep PE / FT_PE / PE_INT8 / FT_PE_INT8 speed benches
+# across a range of batch sizes on a single GPU.
 #
-# Order:
-#   PE     : B = 4, 8, 10, 12, 14, 16
-#   FT_PE  : T = 1, 3, 8 × B = 4, 8, 10, 12, 14, 16
-# Total: 6 + 18 = 24 runs.
+# Required:
+#   GPU=<device-index>      e.g. GPU=0 — the CUDA device to pin to.
 #
-# Cooldowns:
-#   INITIAL_DELAY  before the first run                          (default 10 min)
-#   COOLDOWN       after every run, before the next              (default 10 min)
-# The cooldown is also applied AFTER the last run so the GPU is left cool.
+# Optional sweep knobs (defaults shown):
+#   B_MIN=10                first BATCH in the sweep
+#   B_MAX=70                last BATCH in the sweep
+#   B_STEP=2                BATCH increment
+#   FRAMES_FTPE=3           T (temporal frames) for FT_PE and FT_PE_INT8
+#   DELAY_SEC=180           seconds to sleep BETWEEN iterations (per-B,
+#                           after the four benches at that B have run).
+#                           Set DELAY_SEC=0 to disable cool-down sleeps.
+#   WARMUP=5  ITERS=25      forwarded to each speed bench
+#   SKIP_COS=0              set to 1 to skip the cos/MSE pass on INT8 runs
+#   BENCH_LIST=             space-separated subset of {PE FT_PE PE_INT8
+#                           FT_PE_INT8}; defaults to all four
 #
-# Override via env vars (defaults in parens):
-#   INITIAL_DELAY=600  (seconds)
-#   COOLDOWN=600       (seconds)
-#   WARMUP=5           (forwarded to the underlying bench scripts)
-#   ITERS=25           (forwarded)
-#   BATCHES="4 8 10 12 14 16"
-#   FT_T_VALUES="1 3 8"
-#   SKIP_PE=0          (set to 1 to skip the PE sweep)
-#   SKIP_FTPE=0        (set to 1 to skip the FT_PE sweep)
-#   DRY_RUN=0          (set to 1 to print the plan without running anything)
-#   TAG=""             (suffix appended to every result file via --tag)
+# Output:
+#   results/<bench>_<gpu>_b<B>_..._<timestamp>.json   per-bench
+#   results/sweep_logs/<bench>_b<B>.log               per-bench stdout
+#   results/sweep_logs/run_all_<timestamp>.summary    one-line-per-bench
+#                                                     pass/fail summary
 #
-# Logs:
-#   logs/run_all.<timestamp>.log  receives stdout+stderr of every run, with
-#   GPU temperature / utilization snapshots taken before and after each run.
+# Bench order within each B (deliberate — least → most thermal load,
+# so the GPU has a chance to warm up gradually):
+#
+#   1. PE          (BF16 zero-shot, T=1)
+#   2. FT_PE       (BF16 fine-tuned, T=$FRAMES_FTPE)
+#   3. PE_INT8     (INT8 zero-shot,   T=1)
+#   4. FT_PE_INT8  (INT8 fine-tuned,  T=$FRAMES_FTPE)
+#
+# Each iteration writes four JSONs under results/. The INT8 wrappers
+# additionally append a ``cos_mse`` section to their speed-bench JSON.
 
 set -euo pipefail
 
@@ -35,163 +41,109 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-INITIAL_DELAY=${INITIAL_DELAY:-600}
-COOLDOWN=${COOLDOWN:-600}
+# ── Required: GPU ──────────────────────────────────────────────────────
+if [ -z "${GPU:-}" ]; then
+    echo "ERR: set GPU=<device-index>, e.g. GPU=0 bash scripts/run_all.sh" >&2
+    echo "     (run nvidia-smi to see available device indices)" >&2
+    exit 2
+fi
+export CUDA_VISIBLE_DEVICES="$GPU"
+
+# ── Sweep knobs ────────────────────────────────────────────────────────
+B_MIN=${B_MIN:-10}
+B_MAX=${B_MAX:-70}
+B_STEP=${B_STEP:-2}
+FRAMES_FTPE=${FRAMES_FTPE:-3}
+DELAY_SEC=${DELAY_SEC:-180}
 WARMUP=${WARMUP:-5}
 ITERS=${ITERS:-25}
-BATCHES=${BATCHES:-"4 8 10 12 14 16"}
-FT_T_VALUES=${FT_T_VALUES:-"1 3 8"}
-SKIP_PE=${SKIP_PE:-0}
-SKIP_FTPE=${SKIP_FTPE:-0}
-DRY_RUN=${DRY_RUN:-0}
-TAG=${TAG:-""}
+SKIP_COS=${SKIP_COS:-0}
+BENCH_LIST=${BENCH_LIST:-"PE FT_PE PE_INT8 FT_PE_INT8"}
 
-mkdir -p logs
+# Validate B_MIN <= B_MAX
+if [ "$B_MIN" -gt "$B_MAX" ]; then
+    echo "ERR: B_MIN ($B_MIN) > B_MAX ($B_MAX)" >&2; exit 2
+fi
+
+# ── Logging dir ────────────────────────────────────────────────────────
 TS="$(date +%Y%m%d_%H%M%S)"
-LOG="logs/run_all.${TS}.log"
+LOG_DIR="results/sweep_logs"
+mkdir -p "$LOG_DIR"
+SUMMARY="$LOG_DIR/run_all_${TS}.summary"
+: > "$SUMMARY"
 
-# ----------------------------------------------------------------------------
-# Helpers
+GPU_NAME="$(nvidia-smi --id="$GPU" --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1 || echo unknown)"
 
-human_secs() {
-    # Format seconds as Hh Mm Ss for the banner.
-    local s=$1
-    printf '%dh %02dm %02ds' $((s/3600)) $(((s%3600)/60)) $((s%60))
-}
+echo "[sweep] GPU=$GPU ($GPU_NAME)"
+echo "[sweep] B range: $B_MIN..$B_MAX step $B_STEP"
+echo "[sweep] FRAMES_FTPE=$FRAMES_FTPE  WARMUP=$WARMUP  ITERS=$ITERS"
+echo "[sweep] benches: $BENCH_LIST"
+echo "[sweep] inter-iter delay: ${DELAY_SEC}s"
+echo "[sweep] summary -> $SUMMARY"
+echo
 
-gpu_snapshot() {
-    # One-line GPU stat snapshot, best-effort. Doesn't fail the run.
-    if command -v nvidia-smi >/dev/null 2>&1; then
-        nvidia-smi --query-gpu=index,name,temperature.gpu,utilization.gpu,memory.used,memory.total \
-                   --format=csv,noheader,nounits 2>/dev/null | head -1 \
-            | awk -F', ' '{printf "gpu=%s  name=%s  temp=%s°C  util=%s%%  mem=%s/%s MiB\n",$1,$2,$3,$4,$5,$6}'
+# ── Bench dispatch ─────────────────────────────────────────────────────
+# run_one <bench-name> <B>  → echos "[bench] starting ..." then runs the
+# wrapper, redirecting stdout+stderr to a per-bench log so the sweep
+# console stays readable. Records a one-line summary regardless of
+# success/failure.
+run_one() {
+    local bench="$1" B="$2"
+    local log="$LOG_DIR/${bench}_b${B}.log"
+    local t_start t_end rc
+    t_start=$(date +%s)
+    echo "[$(date +%H:%M:%S)] [sweep] run $bench  B=$B  -> $log"
+    case "$bench" in
+        PE)
+            BATCH="$B" WARMUP="$WARMUP" ITERS="$ITERS" \
+                bash scripts/speed_calculate_PE.sh \
+                >"$log" 2>&1 && rc=0 || rc=$?
+            ;;
+        FT_PE)
+            BATCH="$B" FRAMES="$FRAMES_FTPE" WARMUP="$WARMUP" ITERS="$ITERS" \
+                bash scripts/speed_calculate_FTPE.sh \
+                >"$log" 2>&1 && rc=0 || rc=$?
+            ;;
+        PE_INT8)
+            BATCH="$B" WARMUP="$WARMUP" ITERS="$ITERS" SKIP_COS="$SKIP_COS" \
+                bash scripts/speed_calculate_PE_INT8.sh \
+                >"$log" 2>&1 && rc=0 || rc=$?
+            ;;
+        FT_PE_INT8)
+            BATCH="$B" FRAMES="$FRAMES_FTPE" WARMUP="$WARMUP" ITERS="$ITERS" SKIP_COS="$SKIP_COS" \
+                bash scripts/speed_calculate_FTPE_INT8.sh \
+                >"$log" 2>&1 && rc=0 || rc=$?
+            ;;
+        *)
+            echo "[sweep] WARN: unknown bench '$bench'; skipping" >&2
+            return 0
+            ;;
+    esac
+    t_end=$(date +%s)
+    local dt=$((t_end - t_start))
+    if [ "$rc" -eq 0 ]; then
+        echo "[$(date +%H:%M:%S)] [sweep] OK   $bench  B=$B  (${dt}s)"
+        printf '%s B=%-3d %-12s OK    %4ds\n' "$(date +%H:%M:%S)" "$B" "$bench" "$dt" >>"$SUMMARY"
     else
-        echo "(nvidia-smi unavailable)"
+        echo "[$(date +%H:%M:%S)] [sweep] FAIL $bench  B=$B  (rc=$rc, ${dt}s)  see $log" >&2
+        printf '%s B=%-3d %-12s FAIL  %4ds  rc=%d\n' "$(date +%H:%M:%S)" "$B" "$bench" "$dt" "$rc" >>"$SUMMARY"
     fi
 }
 
-banner() {
-    local msg="$1"
-    {
-        echo
-        echo "════════════════════════════════════════════════════════════════════════════"
-        echo " $msg"
-        echo " $(date --iso-8601=seconds)    $(gpu_snapshot)"
-        echo "════════════════════════════════════════════════════════════════════════════"
-    } | tee -a "$LOG"
-}
-
-cooldown() {
-    local secs=$1
-    local label=$2
-    if [ "$secs" -le 0 ]; then return; fi
-    echo "[cooldown] $label: sleeping $(human_secs "$secs")  (until $(date -d "+$secs seconds" --iso-8601=seconds))" | tee -a "$LOG"
-    if [ "$DRY_RUN" = "1" ]; then return; fi
-    # Sleep in 60s chunks so a Ctrl-C lands within a second.
-    local left=$secs
-    while [ "$left" -gt 0 ]; do
-        local step=60
-        [ "$left" -lt "$step" ] && step=$left
-        sleep "$step"
-        left=$((left - step))
-    done
-    echo "[cooldown] done.  $(gpu_snapshot)" | tee -a "$LOG"
-}
-
-run_pe() {
-    local b=$1
-    banner "PE  | B=${b}"
-    if [ "$DRY_RUN" = "1" ]; then
-        echo "[dry-run] BATCH=$b WARMUP=$WARMUP ITERS=$ITERS ./scripts/speed_calculate_PE.sh ${TAG:+-- --tag $TAG}" | tee -a "$LOG"
-        return
+# ── Main sweep ─────────────────────────────────────────────────────────
+first_iter=1
+for B in $(seq "$B_MIN" "$B_STEP" "$B_MAX"); do
+    if [ "$first_iter" -eq 0 ] && [ "$DELAY_SEC" -gt 0 ]; then
+        echo "[$(date +%H:%M:%S)] [sweep] sleeping ${DELAY_SEC}s before next B=$B"
+        sleep "$DELAY_SEC"
     fi
-    BATCH=$b WARMUP=$WARMUP ITERS=$ITERS \
-        ./scripts/speed_calculate_PE.sh ${TAG:+-- --tag "$TAG"} 2>&1 | tee -a "$LOG"
-}
-
-run_ftpe() {
-    local b=$1
-    local t=$2
-    banner "FT_PE | B=${b}  T=${t}"
-    if [ "$DRY_RUN" = "1" ]; then
-        echo "[dry-run] BATCH=$b FRAMES=$t WARMUP=$WARMUP ITERS=$ITERS ./scripts/speed_calculate_FTPE.sh ${TAG:+-- --tag $TAG}" | tee -a "$LOG"
-        return
-    fi
-    BATCH=$b FRAMES=$t WARMUP=$WARMUP ITERS=$ITERS \
-        ./scripts/speed_calculate_FTPE.sh ${TAG:+-- --tag "$TAG"} 2>&1 | tee -a "$LOG"
-}
-
-# ----------------------------------------------------------------------------
-# Plan
-
-# shellcheck disable=SC2206
-B_ARR=($BATCHES)
-# shellcheck disable=SC2206
-T_ARR=($FT_T_VALUES)
-
-PE_RUNS=0
-FTPE_RUNS=0
-[ "$SKIP_PE" = "0" ]   && PE_RUNS=${#B_ARR[@]}
-[ "$SKIP_FTPE" = "0" ] && FTPE_RUNS=$(( ${#B_ARR[@]} * ${#T_ARR[@]} ))
-TOTAL_RUNS=$((PE_RUNS + FTPE_RUNS))
-
-# Total wall time estimate: each run ~1-2 min on A4000, plus cooldowns.
-# (TOTAL_RUNS - 1) gaps between runs, plus the initial delay and a final cooldown.
-EST_COOLDOWN_S=$((INITIAL_DELAY + TOTAL_RUNS * COOLDOWN))
-EST_BENCH_S=$((TOTAL_RUNS * 120))  # rough 2-min upper bound per run
-EST_TOTAL_S=$((EST_COOLDOWN_S + EST_BENCH_S))
-
-{
-    echo "═════════ run_all sweep ═════════"
-    echo "  start         : $(date --iso-8601=seconds)"
-    echo "  log           : $LOG"
-    echo "  PE batches    : ${BATCHES}                       (count=${#B_ARR[@]}, skip=$SKIP_PE)"
-    echo "  FT_PE T values: ${FT_T_VALUES}                       (count=${#T_ARR[@]}, skip=$SKIP_FTPE)"
-    echo "  WARMUP / ITERS: $WARMUP / $ITERS"
-    echo "  INITIAL_DELAY : $(human_secs "$INITIAL_DELAY")"
-    echo "  COOLDOWN      : $(human_secs "$COOLDOWN")  (also after the last run)"
-    echo "  total runs    : $TOTAL_RUNS  (PE=$PE_RUNS, FT_PE=$FTPE_RUNS)"
-    echo "  est. wall time: ~$(human_secs "$EST_TOTAL_S")  (cooldowns ~$(human_secs "$EST_COOLDOWN_S") + bench ~$(human_secs "$EST_BENCH_S"))"
-    [ "$DRY_RUN" = "1" ] && echo "  DRY_RUN       : YES (no commands executed)"
-    echo "═════════════════════════════════"
-} | tee -a "$LOG"
-
-if [ "$TOTAL_RUNS" -eq 0 ]; then
-    echo "Nothing to run (both SKIP_PE and SKIP_FTPE are set)." | tee -a "$LOG"
-    exit 0
-fi
-
-# ----------------------------------------------------------------------------
-# Run
-
-cooldown "$INITIAL_DELAY" "initial GPU cool-down"
-
-i=0
-if [ "$SKIP_PE" = "0" ]; then
-    for b in "${B_ARR[@]}"; do
-        i=$((i + 1))
-        echo "[$i/$TOTAL_RUNS] starting PE run" | tee -a "$LOG"
-        run_pe "$b"
-        # Cooldown after every run, including the last one.
-        cooldown "$COOLDOWN" "after run $i/$TOTAL_RUNS"
+    first_iter=0
+    echo "[$(date +%H:%M:%S)] [sweep] === iteration B=$B ==="
+    for bench in $BENCH_LIST; do
+        run_one "$bench" "$B"
     done
-fi
+done
 
-if [ "$SKIP_FTPE" = "0" ]; then
-    for t in "${T_ARR[@]}"; do
-        for b in "${B_ARR[@]}"; do
-            i=$((i + 1))
-            echo "[$i/$TOTAL_RUNS] starting FT_PE run" | tee -a "$LOG"
-            run_ftpe "$b" "$t"
-            cooldown "$COOLDOWN" "after run $i/$TOTAL_RUNS"
-        done
-    done
-fi
-
-banner "sweep complete"
-echo "[done] $i runs.  log: $LOG" | tee -a "$LOG"
-
-# Aggregate now so summary.txt is up to date.
-if [ "$DRY_RUN" != "1" ]; then
-    ./scripts/aggregate_results.sh 2>&1 | tee -a "$LOG" || true
-fi
+echo
+echo "[sweep] done. summary:"
+cat "$SUMMARY"

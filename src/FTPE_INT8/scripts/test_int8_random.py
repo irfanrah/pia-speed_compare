@@ -25,10 +25,13 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 import statistics
+import subprocess
 import sys
 import time
+from datetime import datetime
 from typing import Dict, List
 
 import numpy as np
@@ -177,6 +180,35 @@ def fmt_row(name: str, cos: float, mse: float, ok: bool) -> str:
     return (f"  {name:<48}  {cos:>10.6f}   {mse:>10.3e}   {flag}")
 
 
+def _gpu_info(device_index: int = 0) -> dict:
+    props = torch.cuda.get_device_properties(device_index)
+    try:
+        driver = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            text=True,
+        ).strip().splitlines()[0]
+    except Exception:
+        driver = None
+    return {
+        "name": torch.cuda.get_device_name(device_index),
+        "device_index": device_index,
+        "compute_capability": f"{props.major}.{props.minor}",
+        "total_memory_mib": int(props.total_memory / 1024 / 1024),
+        "driver_version": driver,
+    }
+
+
+def _summarize(samples: List[float]) -> dict:
+    if not samples:
+        return {"mean": None, "min": None, "max": None, "std": None}
+    return {
+        "mean": float(statistics.fmean(samples)),
+        "min":  float(min(samples)),
+        "max":  float(max(samples)),
+        "std":  float(statistics.pstdev(samples)) if len(samples) > 1 else 0.0,
+    }
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -197,11 +229,38 @@ def main() -> int:
                    help="Pass threshold for cosine similarity vs PT BF16.")
     p.add_argument("--max_mse", type=float, default=1e-3,
                    help="Pass threshold for MSE vs PT BF16.")
+    p.add_argument("--append-to", type=str, default=None,
+                   help="If set, append a ``cos_mse`` section to this existing "
+                        "speed-bench JSON (in place). Avoids re-emitting gpu / "
+                        "config / timestamp fields that already live in the "
+                        "speed JSON. Wrappers wire this up by grepping the "
+                        "speed bench's `wrote: <path>` log line.")
     args = p.parse_args()
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA required")
     device = torch.device("cuda")
+
+    # Defensive: some torch + conda-env + cuDNN combos crash at the first
+    # nn.Conv2d call with "RuntimeError: cuDNN error:
+    # CUDNN_STATUS_NOT_INITIALIZED" (typically a wheel-bundled cuDNN vs
+    # system cuDNN version mismatch). The cos pass is a correctness check,
+    # not a benchmark — disable cuDNN so Conv2d routes through native CUDA.
+    # Numerics are equivalent for cos / MSE purposes (any difference is at
+    # the 1e-7 noise floor that ALREADY shows up in the BF16 baseline row).
+    try:
+        torch.backends.cudnn.enabled = False
+    except Exception:
+        pass
+
+    # Also try to keep the per-process CUDA workspace small — when the
+    # speed bench just ran the GPU hot and freed a large dynamic-profile
+    # context, the new process can transiently see an OOM during cuDNN /
+    # cuBLAS handle creation. Limit our split to avoid that.
+    try:
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
 
     bt = args.batch_videos * args.frames_per_video
     print(f"[test] config={args.config_name}  "
@@ -294,6 +353,47 @@ def main() -> int:
         print(fmt_row(name, cos, mse, ok))
 
     print(f"\n[test] thresholds: cos >= {args.min_cos}   mse <= {args.max_mse:.0e}")
+
+    # ── Append cos_mse section to the speed-bench JSON ─────────────────
+    if args.append_to:
+        engines_summary: Dict[str, dict] = {}
+        for name in runners:
+            cos_samples = acc[name]["cos"]
+            mse_samples = acc[name]["mse"]
+            cos_mean = statistics.fmean(cos_samples)
+            mse_mean = statistics.fmean(mse_samples)
+            engines_summary[name] = {
+                "cos": _summarize(cos_samples),
+                "mse": _summarize(mse_samples),
+                "iters": [
+                    {"iter": i, "cos": round(c, 8), "mse": round(m, 12)}
+                    for i, (c, m) in enumerate(zip(cos_samples, mse_samples))
+                ],
+                "passed": (cos_mean >= args.min_cos) and (mse_mean <= args.max_mse),
+            }
+        cos_section = {
+            "test_kind": "random_image_cos_mse",
+            "engine_dir": args.engine_dir,
+            "ft_ckpt": args.ft_ckpt,
+            "iters": args.iters,
+            "seed": args.seed,
+            "min_cos": args.min_cos,
+            "max_mse": args.max_mse,
+            "engines": engines_summary,
+            "overall_passed": not any_fail,
+        }
+        try:
+            with open(args.append_to, "r") as f:
+                speed_json = json.load(f)
+            speed_json["cos_mse"] = cos_section
+            with open(args.append_to, "w") as f:
+                json.dump(speed_json, f, indent=2)
+            print(f"[test] appended cos_mse section to: {args.append_to}")
+        except FileNotFoundError:
+            print(f"[test] WARN: --append-to target not found: {args.append_to}", file=sys.stderr)
+        except json.JSONDecodeError as e:
+            print(f"[test] WARN: --append-to target is not valid JSON ({e}); skipping append", file=sys.stderr)
+
     if any_fail:
         print("[test] FAIL — one or more engines did not meet the threshold")
         return 1

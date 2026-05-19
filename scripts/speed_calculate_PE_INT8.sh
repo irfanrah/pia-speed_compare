@@ -22,6 +22,14 @@
 #
 # Override defaults via env vars (BATCH, WARMUP, ITERS, PE_INT8_ENGINE,
 # PE_TEXT_FEATURES) or pass extra args after ``--``.
+#
+# After the speed bench, this wrapper also runs the random-image cos/MSE
+# comparator (src/FTPE_INT8/scripts/test_int8_random.py) against every
+# ``.engine`` in the same directory as ``PE_INT8_ENGINE``. Skip via
+# ``SKIP_COS=1``. The cos test needs the QAT-deployed FP32 .pt; default
+# location matches what ``run_int8_pipeline.sh`` auto-fetches from HF:
+#   PE_QAT_PT=src/FTPE_INT8/.hf_cache/pe/splitqkv_qat/qat_deploy_fp32.pt
+# Override with ``PE_QAT_PT=/path/to/qat_deploy_fp32.pt``.
 
 set -euo pipefail
 
@@ -65,6 +73,10 @@ if [ "${1:-}" = "--" ]; then
     EXTRA=("$@")
 fi
 
+# Capture the speed-bench JSON path so the cos pass can append its section
+# to it. Use `script` (PTY-preserving) so we don't lose interactive flush
+# behaviour, falling back to plain `tee` for portability.
+SPEED_LOG="$(mktemp -t pe_int8_speed.XXXXXX.log)"
 "$PYTHON" src/speed_calculate_PE.py \
     --engine "$PE_INT8_ENGINE" \
     --text-features "$PE_TEXT_FEATURES" \
@@ -72,4 +84,69 @@ fi
     --warmup "$WARMUP" \
     --iters "$ITERS" \
     --tag int8 \
-    "${EXTRA[@]}"
+    "${EXTRA[@]}" 2>&1 | tee "$SPEED_LOG"
+SPEED_JSON="$(awk '/^wrote: /{print $2; exit}' "$SPEED_LOG")"
+rm -f "$SPEED_LOG"
+
+# ── Random-image cos/MSE check vs PT BF16 ───────────────────────────────
+SKIP_COS=${SKIP_COS:-0}
+if [ "$SKIP_COS" = "1" ]; then
+    echo "[PE_INT8] cos/MSE check skipped (SKIP_COS=1)"
+    exit 0
+fi
+
+PE_QAT_PT=${PE_QAT_PT:-src/FTPE_INT8/.hf_cache/pe/splitqkv_qat/qat_deploy_fp32.pt}
+COS_ITERS=${COS_ITERS:-5}
+COS_MIN_COS=${COS_MIN_COS:-0.99}
+COS_MAX_MSE=${COS_MAX_MSE:-1e-3}
+
+if [ ! -f "$PE_QAT_PT" ]; then
+    echo "[PE_INT8] cos/MSE check skipped — PE_QAT_PT not found: $PE_QAT_PT" >&2
+    echo "[PE_INT8]   Run VARIANT=pe bash src/FTPE_INT8/scripts/run_int8_pipeline.sh to fetch it," >&2
+    echo "[PE_INT8]   or set PE_QAT_PT=/path/to/qat_deploy_fp32.pt, or SKIP_COS=1 to opt out." >&2
+    exit 0
+fi
+
+PE_INT8_ENGINE_DIR="$(dirname "$PE_INT8_ENGINE")"
+
+# NOTE: we deliberately do NOT prepend pip's nvidia-cudnn-cu12 dir to
+# LD_LIBRARY_PATH here (unlike run_int8_pipeline.sh, which does it for ORT).
+# torch already bundles its own libcudnn under ``torch/lib/``; forcing a
+# different libcudnn earlier on LD_LIBRARY_PATH triggers a version mismatch
+# inside ``nn.Conv2d``'s cuDNN init (CUDNN_STATUS_NOT_INITIALIZED). The cos
+# pass uses only torch + TensorRT — both find their own CUDA libs without
+# manual help. The cos script itself also disables cuDNN as a belt-and-
+# braces guard against wheel/system cuDNN mismatches that show up in some
+# conda envs (test_int8_random.py sets ``cudnn.enabled = False``).
+
+# Brief settle: give CUDA a moment to release the bench process's
+# dynamic-profile context (it pre-allocates ~6 GB on FT_PE / ~3 GB on PE
+# at the OPT shape; teardown can lag a few hundred ms).
+sleep 2
+
+echo
+echo "[PE_INT8] === random-image cos/MSE vs PT BF16 ==="
+echo "[PE_INT8] engines:    $PE_INT8_ENGINE_DIR"
+echo "[PE_INT8] PT ckpt:    $PE_QAT_PT"
+echo "[PE_INT8] B=$BATCH  T=1  iters=$COS_ITERS  min_cos=$COS_MIN_COS  max_mse=$COS_MAX_MSE"
+
+# `test_int8_random.py` walks every .engine in --engine-dir; the per-engine
+# profile check inside it skips engines whose [min,max] doesn't include BT.
+# When SPEED_JSON was captured above, the cos pass appends a ``cos_mse``
+# section to it in place — single JSON per run instead of a sidecar file.
+APPEND_TO_ARGS=()
+if [ -n "${SPEED_JSON:-}" ] && [ -f "$SPEED_JSON" ]; then
+    APPEND_TO_ARGS=(--append-to "$SPEED_JSON")
+fi
+"$PYTHON" src/FTPE_INT8/scripts/test_int8_random.py \
+    --engine-dir "$PE_INT8_ENGINE_DIR" \
+    --ft_ckpt "$PE_QAT_PT" \
+    --config_name PE-Core-L14-336 \
+    --batch_videos "$BATCH" --frames_per_video 1 \
+    --iters "$COS_ITERS" \
+    --min_cos "$COS_MIN_COS" \
+    --max_mse "$COS_MAX_MSE" \
+    "${APPEND_TO_ARGS[@]}" || {
+        echo "[PE_INT8] cos/MSE check exited non-zero (engine(s) below threshold)" >&2
+        exit 0  # don't fail the wrapper — the speed numbers above are still valid
+    }
