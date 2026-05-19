@@ -22,6 +22,14 @@
 #
 # Override defaults via env vars (BATCH, WARMUP, ITERS, PE_INT8_ENGINE,
 # PE_TEXT_FEATURES) or pass extra args after ``--``.
+#
+# After the speed bench, this wrapper also runs the random-image cos/MSE
+# comparator (src/FTPE_INT8/scripts/test_int8_random.py) against every
+# ``.engine`` in the same directory as ``PE_INT8_ENGINE``. Skip via
+# ``SKIP_COS=1``. The cos test needs the QAT-deployed FP32 .pt; default
+# location matches what ``run_int8_pipeline.sh`` auto-fetches from HF:
+#   PE_QAT_PT=src/FTPE_INT8/.hf_cache/pe/splitqkv_qat/qat_deploy_fp32.pt
+# Override with ``PE_QAT_PT=/path/to/qat_deploy_fp32.pt``.
 
 set -euo pipefail
 
@@ -73,3 +81,74 @@ fi
     --iters "$ITERS" \
     --tag int8 \
     "${EXTRA[@]}"
+
+# ── Random-image cos/MSE check vs PT BF16 ───────────────────────────────
+SKIP_COS=${SKIP_COS:-0}
+if [ "$SKIP_COS" = "1" ]; then
+    echo "[PE_INT8] cos/MSE check skipped (SKIP_COS=1)"
+    exit 0
+fi
+
+PE_QAT_PT=${PE_QAT_PT:-src/FTPE_INT8/.hf_cache/pe/splitqkv_qat/qat_deploy_fp32.pt}
+COS_ITERS=${COS_ITERS:-5}
+COS_MIN_COS=${COS_MIN_COS:-0.99}
+COS_MAX_MSE=${COS_MAX_MSE:-1e-3}
+
+if [ ! -f "$PE_QAT_PT" ]; then
+    echo "[PE_INT8] cos/MSE check skipped — PE_QAT_PT not found: $PE_QAT_PT" >&2
+    echo "[PE_INT8]   Run VARIANT=pe bash src/FTPE_INT8/scripts/run_int8_pipeline.sh to fetch it," >&2
+    echo "[PE_INT8]   or set PE_QAT_PT=/path/to/qat_deploy_fp32.pt, or SKIP_COS=1 to opt out." >&2
+    exit 0
+fi
+
+PE_INT8_ENGINE_DIR="$(dirname "$PE_INT8_ENGINE")"
+
+# Expose PE vendor + pip-installed CUDA libs the test_int8_random script needs.
+# (TRT inference normally doesn't need cuDNN, but `import tensorrt` can pull
+# in cuBLAS/CUDA-runtime; if the script ever hits a missing-lib failure on a
+# host where torch's bundled libs aren't on LD_LIBRARY_PATH, the discovery
+# below picks them up the same way run_int8_pipeline.sh does.)
+_NV_LIBS="$("$PYTHON" -c '
+import os, importlib, site
+libs=[]
+roots = []
+for sp in site.getsitepackages() + [site.getusersitepackages()]:
+    n = os.path.join(sp, "nvidia")
+    if os.path.isdir(n) and n not in roots: roots.append(n)
+for name in ["cudnn","cublas","cuda_runtime","cufft","curand","cusolver","cusparse","nccl","nvjitlink","cuda_cupti","cuda_nvrtc"]:
+    p = None
+    try:
+        m = importlib.import_module(f"nvidia.{name}")
+        if getattr(m, "__file__", None):
+            p = os.path.join(os.path.dirname(m.__file__), "lib")
+    except Exception: pass
+    if not p or not os.path.isdir(p):
+        for r in roots:
+            cand = os.path.join(r, name, "lib")
+            if os.path.isdir(cand): p = cand; break
+    if p and os.path.isdir(p) and p not in libs: libs.append(p)
+print(":".join(libs))
+' 2>/dev/null || true)"
+if [ -n "$_NV_LIBS" ]; then
+    export LD_LIBRARY_PATH="$_NV_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
+echo
+echo "[PE_INT8] === random-image cos/MSE vs PT BF16 ==="
+echo "[PE_INT8] engines:    $PE_INT8_ENGINE_DIR"
+echo "[PE_INT8] PT ckpt:    $PE_QAT_PT"
+echo "[PE_INT8] B=$BATCH  T=1  iters=$COS_ITERS  min_cos=$COS_MIN_COS  max_mse=$COS_MAX_MSE"
+
+# `test_int8_random.py` walks every .engine in --engine-dir; the per-engine
+# profile check inside it skips engines whose [min,max] doesn't include BT.
+"$PYTHON" src/FTPE_INT8/scripts/test_int8_random.py \
+    --engine-dir "$PE_INT8_ENGINE_DIR" \
+    --ft_ckpt "$PE_QAT_PT" \
+    --config_name PE-Core-L14-336 \
+    --batch_videos "$BATCH" --frames_per_video 1 \
+    --iters "$COS_ITERS" \
+    --min_cos "$COS_MIN_COS" \
+    --max_mse "$COS_MAX_MSE" || {
+        echo "[PE_INT8] cos/MSE check exited non-zero (engine(s) below threshold)" >&2
+        exit 0  # don't fail the wrapper — the speed numbers above are still valid
+    }
