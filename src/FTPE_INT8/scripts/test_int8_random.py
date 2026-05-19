@@ -25,10 +25,13 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import os
 import statistics
+import subprocess
 import sys
 import time
+from datetime import datetime
 from typing import Dict, List
 
 import numpy as np
@@ -177,6 +180,35 @@ def fmt_row(name: str, cos: float, mse: float, ok: bool) -> str:
     return (f"  {name:<48}  {cos:>10.6f}   {mse:>10.3e}   {flag}")
 
 
+def _gpu_info(device_index: int = 0) -> dict:
+    props = torch.cuda.get_device_properties(device_index)
+    try:
+        driver = subprocess.check_output(
+            ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"],
+            text=True,
+        ).strip().splitlines()[0]
+    except Exception:
+        driver = None
+    return {
+        "name": torch.cuda.get_device_name(device_index),
+        "device_index": device_index,
+        "compute_capability": f"{props.major}.{props.minor}",
+        "total_memory_mib": int(props.total_memory / 1024 / 1024),
+        "driver_version": driver,
+    }
+
+
+def _summarize(samples: List[float]) -> dict:
+    if not samples:
+        return {"mean": None, "min": None, "max": None, "std": None}
+    return {
+        "mean": float(statistics.fmean(samples)),
+        "min":  float(min(samples)),
+        "max":  float(max(samples)),
+        "std":  float(statistics.pstdev(samples)) if len(samples) > 1 else 0.0,
+    }
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -197,6 +229,12 @@ def main() -> int:
                    help="Pass threshold for cosine similarity vs PT BF16.")
     p.add_argument("--max_mse", type=float, default=1e-3,
                    help="Pass threshold for MSE vs PT BF16.")
+    p.add_argument("--out-dir", type=str, default=None,
+                   help="If set, write a per-engine cos/MSE summary JSON here. "
+                        "Filename: cos_mse_<gpu>_b<B>_t<T>_<timestamp><_tag>.json.")
+    p.add_argument("--tag", type=str, default="",
+                   help="Optional suffix appended to the output JSON filename "
+                        "(matches scripts/speed_calculate_*.py's --tag convention).")
     args = p.parse_args()
 
     if not torch.cuda.is_available():
@@ -315,6 +353,58 @@ def main() -> int:
         print(fmt_row(name, cos, mse, ok))
 
     print(f"\n[test] thresholds: cos >= {args.min_cos}   mse <= {args.max_mse:.0e}")
+
+    # ── Optional JSON dump ─────────────────────────────────────────────
+    if args.out_dir:
+        gpu = _gpu_info()
+        engines_summary: Dict[str, dict] = {}
+        for name in runners:
+            cos_samples = acc[name]["cos"]
+            mse_samples = acc[name]["mse"]
+            cos_mean = statistics.fmean(cos_samples)
+            mse_mean = statistics.fmean(mse_samples)
+            engines_summary[name] = {
+                "cos": _summarize(cos_samples),
+                "mse": _summarize(mse_samples),
+                "iters": [
+                    {"iter": i, "cos": round(c, 8), "mse": round(m, 12)}
+                    for i, (c, m) in enumerate(zip(cos_samples, mse_samples))
+                ],
+                "passed": (cos_mean >= args.min_cos) and (mse_mean <= args.max_mse),
+            }
+        initial_time = datetime.now()
+        payload = {
+            "test_kind": "random_image_cos_mse",
+            "initial_time": initial_time.isoformat(timespec="seconds"),
+            "config_name": args.config_name,
+            "ft_ckpt": args.ft_ckpt,
+            "engine_dir": args.engine_dir,
+            "batch_videos": args.batch_videos,
+            "frames_per_video": args.frames_per_video,
+            "bt": bt,
+            "iters": args.iters,
+            "seed": args.seed,
+            "min_cos": args.min_cos,
+            "max_mse": args.max_mse,
+            "gpu": gpu,
+            "gpu_type": gpu["name"],
+            "torch_version": torch.__version__,
+            "cuda_runtime": torch.version.cuda,
+            "engines": engines_summary,
+            "overall_passed": not any_fail,
+        }
+        os.makedirs(args.out_dir, exist_ok=True)
+        safe_gpu = gpu["name"].replace(" ", "_").replace("/", "_")
+        ts = initial_time.strftime("%Y%m%d_%H%M%S")
+        suffix = f"_{args.tag}" if args.tag else ""
+        out_path = os.path.join(
+            args.out_dir,
+            f"cos_mse_{safe_gpu}_b{args.batch_videos}_t{args.frames_per_video}_{ts}{suffix}.json",
+        )
+        with open(out_path, "w") as f:
+            json.dump(payload, f, indent=2)
+        print(f"[test] wrote: {out_path}")
+
     if any_fail:
         print("[test] FAIL — one or more engines did not meet the threshold")
         return 1

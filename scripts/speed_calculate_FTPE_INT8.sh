@@ -117,6 +117,8 @@ echo "[FT_PE_INT8] B=$BATCH  T=$FRAMES  iters=$COS_ITERS  min_cos=$COS_MIN_COS  
 
 # `test_int8_random.py` walks every .engine in --engine-dir; the per-engine
 # profile check skips engines whose [min,max] doesn't include BT.
+COS_OUT_DIR=${COS_OUT_DIR:-results}
+COS_TAG=${COS_TAG:-ftpe_int8}
 "$PYTHON" src/FTPE_INT8/scripts/test_int8_random.py \
     --engine-dir "$FTPE_INT8_ENGINE_DIR" \
     --ft_ckpt "$FTPE_QAT_PT" \
@@ -124,7 +126,8 @@ echo "[FT_PE_INT8] B=$BATCH  T=$FRAMES  iters=$COS_ITERS  min_cos=$COS_MIN_COS  
     --batch_videos "$BATCH" --frames_per_video "$FRAMES" \
     --iters "$COS_ITERS" \
     --min_cos "$COS_MIN_COS" \
-    --max_mse "$COS_MAX_MSE" || {
+    --max_mse "$COS_MAX_MSE" \
+    --out-dir "$COS_OUT_DIR" --tag "$COS_TAG" || {
         echo "[FT_PE_INT8] cos/MSE check exited non-zero (engine(s) below threshold)" >&2
         exit 0  # don't fail the wrapper — the speed numbers above are still valid
     }
