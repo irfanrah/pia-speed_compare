@@ -147,6 +147,10 @@ def main() -> int:
 
     print(f"[export] writing ONNX -> {out_path}  (trace device={device})")
     with torch.no_grad():
+        # Force the legacy TorchScript exporter. torch 2.9+ defaults the
+        # `dynamo=` kwarg to True; on this model the dynamo path fails with
+        # "Unhandled FakeTensor Device Propagation for aten.mul.Tensor",
+        # whereas the legacy path traces cleanly.
         torch.onnx.export(
             vmodel, dummy, out_path,
             input_names=["input"],
@@ -154,6 +158,7 @@ def main() -> int:
             dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}},
             opset_version=args.opset,
             do_constant_folding=True,
+            dynamo=False,
         )
 
     del vmodel, model, dummy
