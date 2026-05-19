@@ -17,22 +17,29 @@ Stage boundary convention (shared with the FT_PE bench):
       ``half_cycle`` -- that work lives only in the full/three-quarters
       stages.
 
-    full_cycle:            disk read -> _preprocess_stage -> _inference_stage
+    full_cycle:            input gen -> _preprocess_stage -> _inference_stage
                            -> _postprocess_stage
                            (end-to-end: deque append -> cos sim vs text
                             features -> top-K -> duration-queue alarm)
     three_quarters_cycle:  in-memory ndarray -> _preprocess_stage
                            -> _inference_stage -> _postprocess_stage
-                           (full_cycle minus disk read)
-    half_cycle:            disk read -> _preprocess_stage -> _inference_stage
+                           (full_cycle minus input gen)
+    half_cycle:            input gen -> _preprocess_stage -> _inference_stage
                            (stops at video emb (B, 1024); no text-side work)
     inference:             already-preprocessed CUDA tensor -> _inference_stage
                            (stops at visual emb (B, 1024); no preprocess,
                             no text)
-    disk_read:             isolated cost of B ndarrays from disk
-                           (PIL.Image.open + decode + np.array)
+    input_gen:             isolated cost of generating B random 1080p uint8
+                           ndarrays (no disk I/O)
     cos_sim:               isolated text-side block (mean-pool + cos sim vs
                            text features + top-K + alarm event manager)
+
+Inputs are now **randomly generated** at each tick rather than read from disk.
+Each call to ``gen_random_frame()`` returns a fresh (1080, 1920, 3) uint8
+ndarray with new RNG-derived pixels, so per-iter and per-B-position inputs
+all differ -- removes the disk-I/O bottleneck the prior PIL-decode path
+imposed at high batch sizes. The ``--image`` CLI flag is preserved for
+backwards compat but is ignored.
 
 GPU temperature is polled per iter via NVML when ``pynvml`` is installed,
 falling back to nvidia-smi otherwise.
@@ -116,8 +123,22 @@ def gpu_info(device_index: int = 0) -> dict:
     }
 
 
+_FRAME_RNG = np.random.default_rng()
+_FRAME_HW = (1080, 1920, 3)  # match a typical 1080p RGB camera frame
+
+
+def gen_random_frame() -> np.ndarray:
+    """Generate a fresh (1080, 1920, 3) uint8 ndarray. Each call returns
+    different pixel values (the RNG state advances), so per-iter and per-B
+    inputs vary -- no disk I/O, no cached template."""
+    return _FRAME_RNG.integers(0, 256, size=_FRAME_HW, dtype=np.uint8)
+
+
 def load_image_ndarray(path: Path) -> np.ndarray:
-    return np.array(Image.open(path).convert("RGB"), copy=True)
+    """Backwards-compat shim. The image-from-disk path argument is ignored;
+    we return a fresh random ndarray instead so the bench measures encoder
+    + service work without the disk-I/O bottleneck."""
+    return gen_random_frame()
 
 
 def stats(samples_ms: list[float]) -> dict:
@@ -174,11 +195,10 @@ def benchmark(
     user_params = make_user_params(batch_size)
 
     # cv_bgr2rgb_batch (called inside _preprocess_stage) mutates ndarrays in
-    # place, so each timed call needs fresh copies of the frame.
-    template = load_image_ndarray(image_path)
-
+    # place, so each timed call needs fresh ndarrays. With random generation
+    # there's no shared template -- every entry in the B batch is independent.
     def fresh_batches() -> list[np.ndarray]:
-        return [template.copy() for _ in range(batch_size)]
+        return [gen_random_frame() for _ in range(batch_size)]
 
     stream_ids = [f"stream_{i}" for i in range(batch_size)]
 
@@ -201,7 +221,7 @@ def benchmark(
         "three_quarters_cycle": [],
         "half_cycle": [],
         "inference": [],
-        "disk_read": [],
+        "input_gen": [],
         "cos_sim": [],
     }
     per_iter_temp: list[float | None] = []
@@ -210,18 +230,19 @@ def benchmark(
     in_mem = fresh_batches()  # the "ndarray already in RAM" baseline buffer
 
     for _ in range(measure_iters):
-        # full_cycle: disk read -> preprocess -> inference -> postprocess.
+        # full_cycle: input gen -> preprocess -> inference -> postprocess.
         # End-to-end: also runs the cos-sim + top-K + alarm event manager.
         def _full():
-            batches = [load_image_ndarray(image_path) for _ in range(batch_size)]
+            batches = [gen_random_frame() for _ in range(batch_size)]
             x = service._preprocess_stage(batches, user_params)
             v = service._inference_stage(x)
             return service._postprocess_stage(v, batches, stream_ids, user_params)
         _, dt = time_call(_full)
         samples["full_cycle"].append(dt * 1000.0)
 
-        # three_quarters_cycle: same as full_cycle minus disk read. Starts
-        # from an in-memory ndarray (frames already in RAM).
+        # three_quarters_cycle: same as full_cycle minus input gen. Starts
+        # from an in-memory ndarray (frames already in RAM, the in_mem buffer
+        # was generated once before the timed loop).
         def _three_quarters():
             batches = [b.copy() for b in in_mem]
             x = service._preprocess_stage(batches, user_params)
@@ -230,11 +251,11 @@ def benchmark(
         _, dt = time_call(_three_quarters)
         samples["three_quarters_cycle"].append(dt * 1000.0)
 
-        # half_cycle: disk read -> preprocess -> inference (stops at video
+        # half_cycle: input gen -> preprocess -> inference (stops at video
         # emb (B, 1024); no text-side work). PE has TEMPORAL_SIZE = 1, so
         # the per-image visual vector IS the per-stream video embedding.
         def _half():
-            batches = [load_image_ndarray(image_path) for _ in range(batch_size)]
+            batches = [gen_random_frame() for _ in range(batch_size)]
             x = service._preprocess_stage(batches, user_params)
             return service._inference_stage(x)
         _, dt = time_call(_half)
@@ -244,13 +265,14 @@ def benchmark(
         _, dt = time_call(lambda: service._inference_stage(preprocessed))
         samples["inference"].append(dt * 1000.0)
 
-        # disk_read: isolated cost of loading B ndarrays from disk
-        # (PIL.Image.open + decode + np.array). Equals full_cycle minus
-        # three_quarters_cycle in expectation.
+        # input_gen: isolated cost of generating B random (1080, 1920, 3)
+        # uint8 ndarrays for one tick's input. Equals full_cycle minus
+        # three_quarters_cycle in expectation. Replaces the old disk_read
+        # stage now that the bench no longer touches disk.
         _, dt = time_call(
-            lambda: [load_image_ndarray(image_path) for _ in range(batch_size)]
+            lambda: [gen_random_frame() for _ in range(batch_size)]
         )
-        samples["disk_read"].append(dt * 1000.0)
+        samples["input_gen"].append(dt * 1000.0)
 
         # cos_sim: isolated cost of the text-side block. PEEventManager.update
         # does mean-pool over the per-stream deque, cos-sim vs text features,
@@ -281,7 +303,7 @@ def benchmark(
         "three_quarters_cycle_ms": [round(v, 3) for v in samples["three_quarters_cycle"]],
         "half_cycle_ms":           [round(v, 3) for v in samples["half_cycle"]],
         "inference_ms":            [round(v, 3) for v in samples["inference"]],
-        "disk_read_ms":            [round(v, 3) for v in samples["disk_read"]],
+        "input_gen_ms":            [round(v, 3) for v in samples["input_gen"]],
         "cos_sim_ms":              [round(v, 3) for v in samples["cos_sim"]],
         "gpu_temp_c":              [round(t, 1) if t is not None else None for t in per_iter_temp],
     }

@@ -16,15 +16,15 @@ Stage boundary convention (shared with the PE bench):
       differs); ``three_quarters_cycle <= full_cycle`` likewise (only the
       disk read differs).
 
-    full_cycle:            disk read -> _preprocess_stage -> _postprocess_stage
+    full_cycle:            input gen -> _preprocess_stage -> _postprocess_stage
                            (end-to-end per-tick production cycle: gather
                             buffer + sliding-window encode + frame buffer
                             + mean-pool + L2 norm + per-class cos sim +
                             alarm event manager)
     three_quarters_cycle:  in-memory ndarray -> _preprocess_stage
                            -> _postprocess_stage
-                           (full_cycle minus disk read)
-    half_cycle:            disk read -> _preprocess_stage(B)
+                           (full_cycle minus input gen)
+    half_cycle:            input gen -> _preprocess_stage(B)
                            -> (gather buffer + model + frame buffer +
                             per-stream mean-pool, reusing service state)
                            (stops at video_emb (B, 1024); no text-side work)
@@ -32,10 +32,17 @@ Stage boundary convention (shared with the PE bench):
                            -> _inference_stage
                            (stops at per-frame img emb (B, T, 1024); no
                             preprocess, no mean-pool, no text)
-    disk_read:             isolated cost of B ndarrays from disk
-                           (PIL.Image.open + decode + np.array)
+    input_gen:             isolated cost of generating B random 1080p uint8
+                           ndarrays (no disk I/O)
     cos_sim:               isolated text-side block (L2 norm + per-class
                            cos sim vs text features + alarm event manager)
+
+Inputs are now **randomly generated** at each tick rather than read from disk.
+Each call to ``gen_random_frame()`` returns a fresh (1080, 1920, 3) uint8
+ndarray with new RNG-derived pixels, so per-iter and per-B-position inputs
+all differ -- removes the disk-I/O bottleneck the prior PIL-decode path
+imposed at high batch sizes. The ``--image`` CLI flag is preserved for
+backwards compat but is ignored.
 
 half_cycle and three_quarters_cycle both reuse
 ``service.gather_frame_buffers`` and ``service.frame_buffers``, so each
@@ -142,8 +149,22 @@ def gpu_info(device_index: int = 0) -> dict:
     }
 
 
+_FRAME_RNG = np.random.default_rng()
+_FRAME_HW = (1080, 1920, 3)  # match a typical 1080p RGB camera frame
+
+
+def gen_random_frame() -> np.ndarray:
+    """Generate a fresh (1080, 1920, 3) uint8 ndarray. Each call returns
+    different pixel values (RNG state advances), so per-iter and per-B
+    inputs vary -- no disk I/O, no cached template."""
+    return _FRAME_RNG.integers(0, 256, size=_FRAME_HW, dtype=np.uint8)
+
+
 def load_image_ndarray(path: Path) -> np.ndarray:
-    return np.array(Image.open(path).convert("RGB"), copy=True)
+    """Backwards-compat shim. The image-from-disk path argument is ignored;
+    we return a fresh random ndarray instead so the bench measures encoder
+    + service work without the disk-I/O bottleneck."""
+    return gen_random_frame()
 
 
 def stats(samples_ms: list[float]) -> dict:
@@ -226,10 +247,10 @@ def benchmark(
 
     stream_ids = [f"stream_{i}" for i in range(batch_size)]
     user_params = make_user_params(batch_size)
-    template = load_image_ndarray(image_path)
 
     def fresh_batches() -> list[np.ndarray]:
-        return [template.copy() for _ in range(batch_size)]
+        # Random per call -- no shared template, no disk I/O.
+        return [gen_random_frame() for _ in range(batch_size)]
 
     # --- Build a preprocessed (B, T, C, H, W) tensor for the inference-only
     # stage by replicating one tick's preprocessed frames across the temporal
@@ -335,7 +356,7 @@ def benchmark(
         "three_quarters_cycle": [],
         "half_cycle": [],
         "inference": [],
-        "disk_read": [],
+        "input_gen": [],
         "cos_sim": [],
     }
     per_iter_temp: list[float | None] = []
@@ -355,20 +376,21 @@ def benchmark(
     fixed_video_embs = _half_warm.detach()
 
     for _ in range(measure_iters):
-        # full_cycle: one production tick. disk read -> _detect (preprocess
+        # full_cycle: one production tick. input gen -> _detect (preprocess
         # + gather/frame buffers + model + per-stream mean + L2 norm + per-
         # category cos-sim vs text features + alarm event manager). Both
         # buffers are primed so every call yields an alarm decision.
         def _full():
-            batches = [load_image_ndarray(image_path) for _ in range(batch_size)]
+            batches = [gen_random_frame() for _ in range(batch_size)]
             return service._detect(
                 batches=batches, stream_ids=stream_ids, user_params=user_params,
             )
         _, dt = time_call(_full)
         samples["full_cycle"].append(dt * 1000.0)
 
-        # three_quarters_cycle: same tick as full_cycle MINUS the disk read.
-        # Frames already in RAM (e.g. handed in by a camera/grabber buffer).
+        # three_quarters_cycle: same tick as full_cycle MINUS the input gen.
+        # Frames already in RAM (e.g. handed in by a camera/grabber buffer);
+        # in_mem is created once before the timed loop.
         def _three_quarters():
             batches = [b.copy() for b in in_mem]
             return service._detect(
@@ -378,12 +400,12 @@ def benchmark(
         samples["three_quarters_cycle"].append(dt * 1000.0)
 
         # half_cycle: same tick as full_cycle MINUS the text-side work.
-        # disk read -> _preprocess_stage(B) -> postprocess up to per-stream
+        # input gen -> _preprocess_stage(B) -> postprocess up to per-stream
         # mean-pool = (B, 1024) video embeddings. Strictly equal to one
         # full_cycle tick minus L2 norm + cos-sim + alarm, so by construction
         # half_cycle <= full_cycle.
         def _half():
-            batches = [load_image_ndarray(image_path) for _ in range(batch_size)]
+            batches = [gen_random_frame() for _ in range(batch_size)]
             x = service._preprocess_stage(batches, user_params)
             return _postprocess_to_video_emb(x, stream_ids)
         _, dt = time_call(_half)
@@ -393,13 +415,14 @@ def benchmark(
         _, dt = time_call(lambda: service._inference_stage(preprocessed_bt))
         samples["inference"].append(dt * 1000.0)
 
-        # disk_read: isolated cost of loading B ndarrays from disk
-        # (PIL.Image.open + decode + np.array). Equals full_cycle minus
-        # three_quarters_cycle in expectation.
+        # input_gen: isolated cost of generating B random (1080, 1920, 3)
+        # uint8 ndarrays. Equals full_cycle minus three_quarters_cycle in
+        # expectation. Replaces the old disk_read stage now that the bench
+        # no longer touches disk.
         _, dt = time_call(
-            lambda: [load_image_ndarray(image_path) for _ in range(batch_size)]
+            lambda: [gen_random_frame() for _ in range(batch_size)]
         )
-        samples["disk_read"].append(dt * 1000.0)
+        samples["input_gen"].append(dt * 1000.0)
 
         # cos_sim: isolated text-side block (L2 norm + 4× per-class cos-sim
         # vs text features + comparison + alarm event manager). Uses a
@@ -439,7 +462,7 @@ def benchmark(
         "three_quarters_cycle_ms": [round(v, 3) for v in samples["three_quarters_cycle"]],
         "half_cycle_ms":           [round(v, 3) for v in samples["half_cycle"]],
         "inference_ms":            [round(v, 3) for v in samples["inference"]],
-        "disk_read_ms":            [round(v, 3) for v in samples["disk_read"]],
+        "input_gen_ms":            [round(v, 3) for v in samples["input_gen"]],
         "cos_sim_ms":              [round(v, 3) for v in samples["cos_sim"]],
         "gpu_temp_c":              [round(t, 1) if t is not None else None for t in per_iter_temp],
     }
