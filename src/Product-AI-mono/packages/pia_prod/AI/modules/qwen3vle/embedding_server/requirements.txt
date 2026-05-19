@@ -1,0 +1,5 @@
+# vllm/vllm-openai already ships fastapi, uvicorn, pillow, numpy, pydantic,
+# httpx, and (transitively) huggingface_hub. The version pin below is for the
+# entrypoint's auto-download path — kept explicit so a base-image bump that
+# drops huggingface_hub doesn't silently break first-launch.
+huggingface_hub>=0.20    # entrypoint.sh / download_model.py: HF Hub fetch

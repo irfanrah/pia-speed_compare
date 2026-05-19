@@ -1,0 +1,292 @@
+name: Auto PR Review on Request
+
+on:
+  pull_request:
+    types: [review_requested]
+
+jobs:
+  auto-review:
+    # NOTE: 지정된 리뷰어만 트리거
+    if: >
+      github.event.requested_reviewer.login == 'dldidfh' &&
+      github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Get reviewer token
+        id: get_token
+        run: |
+          REVIEWER="${{ github.event.requested_reviewer.login }}"
+          REVIEWER_UPPER=$(echo "$REVIEWER" | tr '[:lower:]' '[:upper:]' | sed 's/-/_/g')
+          TOKEN_NAME="TOKEN_${REVIEWER_UPPER}"
+          echo "token_name=$TOKEN_NAME" >> $GITHUB_OUTPUT
+          echo "reviewer=$REVIEWER" >> $GITHUB_OUTPUT
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+          token: ${{ secrets[steps.get_token.outputs.token_name] }}
+
+      - name: Build review prompt
+        id: build_prompt
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const pr = context.payload.pull_request;
+
+            // 이전 Claude 리뷰가 있는지 체크 (수정 확인 모드 판별)
+            const { data: reviews } = await github.rest.pulls.listReviews({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number
+            });
+            const prevClaudeReview = reviews.find(r => r.body && r.body.includes('🤖 Claude Auto Review'));
+            const isReReview = !!prevClaudeReview;
+
+            // 이전 리뷰의 인라인 코멘트 수집 (수정 확인 모드용)
+            let prevComments = [];
+            if (isReReview && prevClaudeReview) {
+              const { data: allComments } = await github.rest.pulls.listReviewComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: pr.number,
+                per_page: 100
+              });
+              prevComments = allComments
+                .filter(c => c.pull_request_review_id === prevClaudeReview.id)
+                .map(c => ({ path: c.path, line: c.line || c.original_line, body: c.body }));
+            }
+
+            core.setOutput('is_re_review', isReReview ? 'true' : 'false');
+
+            const { data: diff } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              mediaType: { format: 'diff' }
+            });
+
+            const { data: files } = await github.rest.pulls.listFiles({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number
+            });
+
+            const fileList = files.map(f => `- ${f.filename} (+${f.additions} -${f.deletions})`).join('\n');
+
+            // diff를 별도 파일로 저장 (ARG_MAX 초과 방지)
+            fs.writeFileSync('/tmp/pr-diff.txt', diff);
+
+            let prompt = '';
+
+            if (isReReview) {
+              // ── 수정 확인 모드 ──
+              prompt += '당신은 PR 수정 확인 리뷰어입니다.\n\n';
+              prompt += '이전에 REQUEST_CHANGES 리뷰를 달았고, 개발자가 수정했습니다.\n';
+              prompt += '수정이 제대로 반영되었는지 확인하세요.\n\n';
+              prompt += '## PR 정보\n';
+              prompt += `- 제목: ${pr.title}\n`;
+              prompt += `- base: ${pr.base.ref} ← head: ${pr.head.ref}\n\n`;
+              prompt += `## 이전 리뷰 본문:\n${prevClaudeReview.body}\n\n`;
+
+              if (prevComments.length > 0) {
+                prompt += '## 이전 인라인 지적사항:\n';
+                for (const c of prevComments) {
+                  prompt += `### ${c.path}:${c.line}\n${c.body}\n---\n`;
+                }
+                prompt += '\n';
+              }
+
+              prompt += '## Diff\nRead 도구로 /tmp/pr-diff.txt 파일을 읽어 현재 변경사항을 확인하세요.\n\n';
+              prompt += '## 규칙:\n';
+              prompt += '1. 이전 지적사항이 현재 코드에 반영되었는지 하나씩 확인하세요.\n';
+              prompt += '2. 모든 지적사항이 반영되었으면 EVENT: APPROVE를 작성하세요.\n';
+              prompt += '3. 아직 반영 안 된 사항이 있으면 EVENT: REQUEST_CHANGES를 작성하세요.\n';
+              prompt += '4. 리뷰 결과의 첫 줄에 반드시 EVENT: APPROVE 또는 EVENT: REQUEST_CHANGES를 작성하세요.\n';
+              prompt += '5. 각 지적사항별로 반영 여부를 체크리스트로 작성하세요.\n';
+            } else {
+              // ── 일반 리뷰 모드 ──
+              prompt += '당신은 PR 코드 리뷰어입니다.\n\n';
+              prompt += '## PR 정보\n';
+              prompt += `- 제목: ${pr.title}\n`;
+              prompt += `- 설명: ${pr.body || '없음'}\n`;
+              prompt += `- 작성자: ${pr.user.login}\n`;
+              prompt += `- base: ${pr.base.ref} ← head: ${pr.head.ref}\n\n`;
+              prompt += `## 변경된 파일\n${fileList}\n\n`;
+              prompt += '## Diff\nRead 도구로 /tmp/pr-diff.txt 파일을 읽어 변경사항을 확인하세요.\n\n';
+              prompt += '## 규칙:\n';
+              prompt += '1. CLAUDE.md의 상황별 참조 문서 테이블에서 리뷰 가이드를 확인하세요.\n';
+              prompt += '2. 긍정적인 부분도 언급하세요.\n';
+              prompt += '3. 리뷰 결과의 첫 줄에 반드시 다음 중 하나를 작성하세요:\n';
+              prompt += '   EVENT: APPROVE (문제 없을 때)\n';
+              prompt += '   EVENT: REQUEST_CHANGES (수정이 필요할 때)\n';
+              prompt += '   EVENT: COMMENT (의견만 남길 때)\n';
+              prompt += '4. 첫 줄 이후에 마크다운으로 전체 리뷰 요약을 작성하세요.\n';
+              prompt += '5. 파일별 인라인 코멘트는 반드시 다음 형식으로 작성하세요 (diff에 포함된 라인만 가능):\n';
+              prompt += '   <!-- INLINE 파일경로:라인번호 -->\n';
+              prompt += '   코멘트 내용\n';
+              prompt += '   <!-- /INLINE -->\n';
+              prompt += '   예시:\n';
+              prompt += '   <!-- INLINE packages/pia_prod/AI/modules/gangnam_falldown/service.py:42 -->\n';
+              prompt += '   에러 처리가 누락되었습니다. try-except를 추가해주세요.\n';
+              prompt += '   <!-- /INLINE -->\n';
+            }
+
+            fs.writeFileSync('/tmp/review-prompt.txt', prompt);
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Cache Claude Code CLI
+        id: cache-claude
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/lib/node_modules/@anthropic-ai/claude-code
+          key: claude-code-${{ runner.os }}
+
+      - name: Install Claude Code CLI
+        if: steps.cache-claude.outputs.cache-hit != 'true'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Link Claude Code CLI
+        if: steps.cache-claude.outputs.cache-hit == 'true'
+        run: npm link -g @anthropic-ai/claude-code
+
+      - name: Run Claude Code
+        id: claude
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_TOKEN }}
+        run: |
+          set +e
+          cat /tmp/review-prompt.txt | claude -p - \
+            --model opus \
+            --allowedTools "Read,Glob,Grep" \
+            > /tmp/claude-result.txt 2>/tmp/claude-error.txt
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+          set -e
+
+      - name: Submit PR review
+        id: submit_review
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets[steps.get_token.outputs.token_name] }}
+          script: |
+            const fs = require('fs');
+            const result = fs.readFileSync('/tmp/claude-result.txt', 'utf8');
+
+            const eventMatch = result.match(/EVENT:\s*(APPROVE|REQUEST_CHANGES|COMMENT)/);
+            const event = eventMatch ? eventMatch[1] : 'COMMENT';
+            const raw = result.replace(/EVENT:\s*(APPROVE|REQUEST_CHANGES|COMMENT)\n?/, '').trim();
+
+            // 인라인 코멘트 파싱
+            const commentRegex = /<!-- INLINE (.+?):(\d+) -->\n([\s\S]*?)<!-- \/INLINE -->/g;
+            const comments = [];
+            let match;
+            while ((match = commentRegex.exec(raw)) !== null) {
+              comments.push({
+                path: match[1].trim(),
+                line: parseInt(match[2]),
+                body: match[3].trim()
+              });
+            }
+
+            // 인라인 코멘트 마커를 본문에서 제거
+            const body = raw.replace(/<!-- INLINE .+?:\d+ -->\n[\s\S]*?<!-- \/INLINE -->\n?/g, '').trim();
+
+            const reviewParams = {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+              event,
+              body: `🤖 **Claude Auto Review**\n\n${body}`
+            };
+
+            // 인라인 코멘트가 있으면 추가
+            if (comments.length > 0) {
+              reviewParams.comments = comments;
+            }
+
+            let reviewId = null;
+            try {
+              const review = await github.rest.pulls.createReview(reviewParams);
+              reviewId = review.data.id;
+            } catch (e) {
+              // 인라인 코멘트 라인이 diff 범위 밖이면 실패할 수 있음 → 본문에 포함하여 재시도
+              console.log(`Inline comments failed: ${e.message}, falling back to body-only`);
+              let fallbackBody = body;
+              if (comments.length > 0) {
+                fallbackBody += '\n\n---\n## 인라인 코멘트\n';
+                for (const c of comments) {
+                  fallbackBody += `\n**\`${c.path}:${c.line}\`**\n${c.body}\n`;
+                }
+              }
+              const fallbackReview = await github.rest.pulls.createReview({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.payload.pull_request.number,
+                event,
+                body: `🤖 **Claude Auto Review**\n\n${fallbackBody}`
+              });
+              reviewId = fallbackReview.data.id;
+            }
+
+            // 리뷰에 달린 인라인 코멘트 ID 수집
+            let commentIds = [];
+            if (reviewId) {
+              const { data: reviewComments } = await github.rest.pulls.listReviewComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.payload.pull_request.number,
+                per_page: 100
+              });
+              commentIds = reviewComments
+                .filter(c => c.pull_request_review_id === reviewId)
+                .map(c => ({ id: c.id, path: c.path, line: c.line || c.original_line, body: c.body }));
+            }
+
+            // dispatch에서 사용할 output
+            core.setOutput('event', event);
+            fs.writeFileSync('/tmp/review-body.txt', raw);
+            fs.writeFileSync('/tmp/review-comment-ids.json', JSON.stringify(commentIds));
+
+      # ── APPROVE가 아니면 fork로 dispatch ──
+      - name: Dispatch to fork for fix
+        if: steps.submit_review.outputs.event != 'APPROVE'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets[steps.get_token.outputs.token_name] }}
+          script: |
+            const fs = require('fs');
+            const pr = context.payload.pull_request;
+            const reviewBody = fs.readFileSync('/tmp/review-body.txt', 'utf8');
+            const commentIds = JSON.parse(fs.readFileSync('/tmp/review-comment-ids.json', 'utf8'));
+            const forkOwner = pr.head.repo.owner.login;
+
+            await github.rest.repos.createDispatchEvent({
+              owner: forkOwner,
+              repo: pr.head.repo.name,
+              event_type: 'review-fix-request',
+              client_payload: {
+                review_body: reviewBody,
+                review_event: '${{ steps.submit_review.outputs.event }}',
+                review_comments: commentIds,
+                pull_request: {
+                  number: pr.number,
+                  head_ref: pr.head.ref,
+                  base_ref: pr.base.ref,
+                  upstream_owner: context.repo.owner,
+                  upstream_repo: context.repo.repo
+                }
+              }
+            });
+
+            console.log(`Dispatched review-fix-request to ${forkOwner}/${pr.head.repo.name} with ${commentIds.length} comment IDs`);

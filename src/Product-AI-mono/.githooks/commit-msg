@@ -1,0 +1,22 @@
+#!/bin/sh
+
+COMMIT_MESSAGE_FILE_PATH="$1"
+
+python3 ./.githooks/verify_commit_msg.py "$COMMIT_MESSAGE_FILE_PATH"
+RESULT=$?
+
+if [ "$RESULT" -ne 0 ]; then
+    exit 1
+fi
+
+MESSAGE=$(cat "$COMMIT_MESSAGE_FILE_PATH")
+
+FIRST_LINE=$(head -1 "$COMMIT_MESSAGE_FILE_PATH")
+if [ -z "$FIRST_LINE" ]; then
+    exit 1
+fi
+
+BRANCH=$(git branch --show-current)
+POSTFIX=$(echo "$BRANCH" | sed 's:^.*/::' | sed 's:\([^-]*-[^-]*\).*:\1:')
+
+printf "%s\n\n[%s]\n" "$MESSAGE" "$POSTFIX" > "$COMMIT_MESSAGE_FILE_PATH"
