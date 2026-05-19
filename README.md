@@ -73,38 +73,47 @@ Concretely, `_postprocess_stage` does two things in sequence per tick:
 
 ## Stage detail
 
-Step-by-step view of what each tick-based stage runs. Rows are the ordered
-work units inside one timed call; `✓` = included, `—` = skipped.
+Step-by-step view of what each timed stage actually does. Rows are the
+ordered work units; `✓` = included in that stage's timed region, `—` = not.
 
 ### PE (`src/speed_calculate_PE.py`)
 
 ```
-┌───────────────────────────────────────────────────────────────────┬────────────┬─────────────────────────────────┐
-│                               Step                                │ full_cycle │           half_cycle            │
-├───────────────────────────────────────────────────────────────────┼────────────┼─────────────────────────────────┤
-│ [b.copy() for b in in_mem]                                        │ ✓          │ ✓                               │
-├───────────────────────────────────────────────────────────────────┼────────────┼─────────────────────────────────┤
-│ _preprocess_stage (cv_bgr2rgb + ROI + preprocess_image)           │ ✓          │ ✓                               │
-├───────────────────────────────────────────────────────────────────┼────────────┼─────────────────────────────────┤
-│ _inference_stage → TRT model → (B, 1024)                          │ ✓          │ ✓ stops here, returns (B, 1024) │
-├───────────────────────────────────────────────────────────────────┼────────────┼─────────────────────────────────┤
-│ deque append per stream (stream_vector_queues, maxlen=1)          │ ✓          │ —                               │
-├───────────────────────────────────────────────────────────────────┼────────────┼─────────────────────────────────┤
-│ alarm_event_manager: mean-pool + sim = mean @ gpu_vectors.T       │ ✓          │ —                               │
-├───────────────────────────────────────────────────────────────────┼────────────┼─────────────────────────────────┤
-│ _decide_top_category_opt (TOP_CANDIDATE=13)                       │ ✓          │ —                               │
-├───────────────────────────────────────────────────────────────────┼────────────┼─────────────────────────────────┤
-│ process_category: append 1/0 to duration_queue per retEvent key   │ ✓          │ —                               │
-├───────────────────────────────────────────────────────────────────┼────────────┼─────────────────────────────────┤
-│ check_alarm_duration: STATUS_TRANSITION → alarms dict             │ ✓          │ —                               │
-└───────────────────────────────────────────────────────────────────┴────────────┴─────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┬──────┬──────┬───────────┬───────────┬─────────┐
+│                              Step                                │ full │ half │ inference │ input_gen │ cos_sim │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ gen_random_frame × B   (RNG → uint8 (1080,1920,3))               │  —   │  —   │     —     │     ✓     │    —    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ [b.copy() for b in in_mem]  (input ndarrays from upstream)       │  ✓   │  ✓   │     —     │     —     │    —    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ pre-cooked (B, 3, H, W) CUDA tensor  (reused across iters)       │  —   │  —   │     ✓     │     —     │    —    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ _preprocess_stage  (cv_bgr2rgb + ROI + resize / normalize)       │  ✓   │  ✓   │     —     │     —     │    —    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ _inference_stage → TRT model → (B, 1024)                         │  ✓   │  ✓ ⤴ │    ✓ ⤴    │     —     │    —    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ deque append per stream  (stream_vector_queues, maxlen=1)        │  ✓   │  —   │     —     │     —     │    —    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ mean-pool + cos-sim  (mean @ self.gpu_vectors.T)                 │  ✓   │  —   │     —     │     —     │    ✓    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ _decide_top_category_opt  (TOP_CANDIDATE = 13 ranking)           │  ✓   │  —   │     —     │     —     │    ✓    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ process_category  (append 1/0 to duration_queue per retEvent)    │  ✓   │  —   │     —     │     —     │    ✓    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ check_alarm_duration  (STATUS_TRANSITION → alarms dict)          │  ✓   │  —   │     —     │     —     │    ✓    │
+└──────────────────────────────────────────────────────────────────┴──────┴──────┴───────────┴───────────┴─────────┘
 ```
 
-`inference` is the model-only stage: pre-cooked `(B, 3, H, W)` CUDA tensor →
-TRT model → `(B, 1024)`. It does not touch service state.
-`input_gen_and_load` is timed separately as the cost of producing one
-tick's worth of input ndarrays. `cos_sim` is timed as the cost of the
-alarm-side block alone.
+Where each stage stops (the `⤴` arrow above):
+- `half_cycle` returns the `(B, 1024)` visual vector straight out of
+  `_inference_stage`. PE has `TEMPORAL_SIZE = 1`, so the per-image visual
+  vector *is* the per-stream video embedding.
+- `inference` stops at the same point but starts from a pre-cooked CUDA
+  tensor (no preprocess).
+- `cos_sim` reads `service.stream_vector_queues` (already populated by the
+  earlier `full_cycle` call in this iter and by warmup), so it skips
+  everything up to the deque append and times only the alarm path.
+- `input_gen_and_load` runs only the random-frame generation, nothing else.
 
 ### FT_PE (`src/speed_calculate_FTPE.py`)
 
@@ -113,35 +122,50 @@ alarm-side block alone.
 tick triggers an encode.
 
 ```
-┌───────────────────────────────────────────────────────────────────┬────────────┬─────────────────────────────────┐
-│                               Step                                │ full_cycle │           half_cycle            │
-├───────────────────────────────────────────────────────────────────┼────────────┼─────────────────────────────────┤
-│ [b.copy() for b in in_mem]                                        │ ✓          │ ✓                               │
-├───────────────────────────────────────────────────────────────────┼────────────┼─────────────────────────────────┤
-│ _preprocess_stage (cv_bgr2rgb + ROI + preprocess_image)           │ ✓          │ ✓                               │
-├───────────────────────────────────────────────────────────────────┼────────────┼─────────────────────────────────┤
-│ gather_frame_buffers append (same service state across stages)    │ ✓          │ ✓                               │
-├───────────────────────────────────────────────────────────────────┼────────────┼─────────────────────────────────┤
-│ window check + torch.stack(gather) → (B_enc, T, ...)              │ ✓          │ ✓                               │
-├───────────────────────────────────────────────────────────────────┼────────────┼─────────────────────────────────┤
-│ _inference_stage → TRT model → (B_enc, T, 1024) + L2 norm         │ ✓          │ ✓                               │
-├───────────────────────────────────────────────────────────────────┼────────────┼─────────────────────────────────┤
-│ frame_buffers extend + rotate (del [1] if > TEMPORAL_SIZE)        │ ✓          │ ✓                               │
-├───────────────────────────────────────────────────────────────────┼────────────┼─────────────────────────────────┤
-│ per-stream torch.stack(list(buf)).mean(dim=0) → video_emb (1024,) │ ✓          │ ✓ stops here, returns (B, 1024) │
-├───────────────────────────────────────────────────────────────────┼────────────┼─────────────────────────────────┤
-│ torch.stack video_emb across streams + L2 norm                    │ ✓          │ —                               │
-├───────────────────────────────────────────────────────────────────┼────────────┼─────────────────────────────────┤
-│ per-class cos-sim (vis @ category_txt_vectors[c] and normals)     │ ✓          │ —                               │
-├───────────────────────────────────────────────────────────────────┼────────────┼─────────────────────────────────┤
-│ (sim_abn_max > sim_nrm_max).cpu().tolist() per category           │ ✓          │ —                               │
-├───────────────────────────────────────────────────────────────────┼────────────┼─────────────────────────────────┤
-│ alarm_event_manager.update                                        │ ✓          │ —                               │
-└───────────────────────────────────────────────────────────────────┴────────────┴─────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┬──────┬──────┬───────────┬───────────┬─────────┐
+│                              Step                                │ full │ half │ inference │ input_gen │ cos_sim │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ gen_random_frame × B   (RNG → uint8 (1080,1920,3))               │  —   │  —   │     —     │     ✓     │    —    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ [b.copy() for b in in_mem]   (input ndarrays from upstream)      │  ✓   │  ✓   │     —     │     —     │    —    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ pre-cooked (B, T, 3, H, W) CUDA tensor  (reused across iters)    │  —   │  —   │     ✓     │     —     │    —    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ _preprocess_stage  (cv_bgr2rgb + ROI + resize / normalize)       │  ✓   │  ✓   │     —     │     —     │    —    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ gather_frame_buffers append + _unconsumed_frames++               │  ✓   │  ✓   │     —     │     —     │    —    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ window check + torch.stack(gather) → (B_enc, T, 3, H, W)         │  ✓   │  ✓   │     —     │     —     │    —    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ _inference_stage → TRT model → (B_enc, T, 1024) + L2 norm        │  ✓   │  ✓   │    ✓ ⤴    │     —     │    —    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ frame_buffers extend + rotate (del [1] if > TEMPORAL_SIZE)       │  ✓   │  ✓   │     —     │     —     │    —    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ per-stream torch.stack(buf).mean(dim=0) → video_emb (1024,)      │  ✓   │  ✓   │     —     │     —     │    —    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ torch.stack video_emb → (B_ready, 1024)                          │  ✓   │  ✓ ⤴ │     —     │     —     │    —    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ L2 norm of (B, 1024) video embeddings                            │  ✓   │  —   │     —     │     —     │    ✓    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ per-class cos-sim  (vis @ cat_txt[c] and cat_normal[c]).max(1)   │  ✓   │  —   │     —     │     —     │    ✓    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ (sim_abn_max > sim_nrm_max).cpu().tolist() per category          │  ✓   │  —   │     —     │     —     │    ✓    │
+├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
+│ alarm_event_manager.update  (duration_queue + status transition) │  ✓   │  —   │     —     │     —     │    ✓    │
+└──────────────────────────────────────────────────────────────────┴──────┴──────┴───────────┴───────────┴─────────┘
 ```
 
-`inference` is the model-only stage: pre-cooked `(B, T, 3, H, W)` CUDA tensor
-→ TRT model → `(B, T, 1024)`. It does not touch service state.
+Where each stage stops (the `⤴` arrow above):
+- `half_cycle` runs the full vision side via `_postprocess_to_video_emb`
+  (mirror of `_postprocess_stage` truncated right after the per-stream
+  mean-pool), and returns the stacked `(B, 1024)` video embeddings.
+- `inference` runs only `_inference_stage` on the pre-cooked
+  `(B, T, 3, H, W)` tensor — no preprocess, no gather buffer, no
+  frame buffer, no mean-pool.
+- `cos_sim` reads a pre-stacked `(B, 1024)` `video_embeddings` tensor
+  captured once after warmup, so it skips the entire vision side and
+  times only the text-side block.
+- `input_gen_and_load` runs only the random-frame generation, nothing else.
 
 `full_cycle` and `half_cycle` are both **one production tick** — they share
 the same `service.gather_frame_buffers` and `service.frame_buffers` state,
