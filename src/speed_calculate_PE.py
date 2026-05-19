@@ -31,11 +31,16 @@ Stage boundary convention (shared with the FT_PE bench):
                           no check_alarm_duration.
 
 The timed regions for ``full_cycle`` and ``half_cycle`` BOTH start at
-``_preprocess_stage`` with batches sourced from ``in_mem`` (a single fresh
-batch generated once before the timed loop). Input-prep cost is measured
-separately as ``input_gen_and_load`` so encoder + service work can be
-isolated cleanly. Inputs are randomly generated (no disk I/O); the
-``--image`` CLI flag is preserved for backwards compat but ignored.
+``_preprocess_stage`` with batches drawn from a **pre-generated input
+pool** (one big list of unique random (1080, 1920, 3) uint8 ndarrays
+materialized once at bench start, sized to cover every B-batch consumer
+in setup + warmup + measure loop). ``fresh_batches()`` returns the next
+B slots from the pool, .copy()-ing so cv_bgr2rgb_batch can mutate the
+consumer without trashing the source. Each fresh_batches() call advances
+the index, so every iter / stage sees disjoint random data. Input-prep
+cost is reported separately as ``input_gen_and_load`` (timed as a fresh
+``gen_random_frame() × B``, not from the pool). The ``--image`` CLI flag
+is preserved for backwards compat but ignored.
 
 GPU temperature is polled per iter via NVML when ``pynvml`` is installed,
 falling back to nvidia-smi otherwise.
@@ -189,14 +194,42 @@ def benchmark(
 
     service = PEService(Queue())
     user_params = make_user_params(batch_size)
-
-    # cv_bgr2rgb_batch (called inside _preprocess_stage) mutates ndarrays in
-    # place, so each timed call needs fresh ndarrays. With random generation
-    # there's no shared template -- every entry in the B batch is independent.
-    def fresh_batches() -> list[np.ndarray]:
-        return [gen_random_frame() for _ in range(batch_size)]
-
     stream_ids = [f"stream_{i}" for i in range(batch_size)]
+
+    # --- Pre-generated input pool ---------------------------------------
+    # Total B-batches consumed in this bench run:
+    #   1                          preprocessed-tensor setup
+    #   warmup_iters               warmup _detect chain (1 batch / iter)
+    #   2 * measure_iters          measure loop (full + half each iter)
+    # We materialize ONE big pool of unique (1080, 1920, 3) uint8 ndarrays
+    # up front (size = n_batches * B frames). fresh_batches() pulls the
+    # next B from the pool, .copy()-ing so cv_bgr2rgb_batch can mutate
+    # the consumer without trashing the source slot. Every fresh_batches()
+    # call advances the pool index, so no two consumers see the same data.
+    # PE has no temporal-buffer warmup so pool sizing here doesn't depend
+    # on T (T=1 implicit).
+    n_pool_batches = 1 + warmup_iters + 2 * measure_iters
+    _pool_rng = np.random.default_rng()
+    pool: list[np.ndarray] = [
+        _pool_rng.integers(0, 256, size=_FRAME_HW, dtype=np.uint8)
+        for _ in range(n_pool_batches * batch_size)
+    ]
+    pool_idx = [0]
+    print(f"[pool] generated {len(pool)} frames "
+          f"= {n_pool_batches} batches × {batch_size}  "
+          f"({len(pool) * np.prod(_FRAME_HW) / 1e9:.2f} GB)")
+
+    def fresh_batches() -> list[np.ndarray]:
+        """Take the next B ndarrays from the pre-generated pool. Each call
+        advances the index so consecutive calls see disjoint slices."""
+        i = pool_idx[0]
+        if i + batch_size > len(pool):
+            print(f"[pool] WARN: exhausted at {len(pool)} frames; wrapping",
+                  file=sys.stderr)
+            i = 0
+        batch = [arr.copy() for arr in pool[i:i + batch_size]]
+        pool_idx[0] = i + batch_size
+        return batch
 
     # One preprocessed CUDA tensor reused across iters for the inference-only
     # stage.
@@ -222,17 +255,17 @@ def benchmark(
     per_iter_temp: list[float | None] = []
     t_start = query_gpu_temp_c()
 
-    in_mem = fresh_batches()  # ndarrays handed in from upstream (camera, RNG, ...)
-
     for _ in range(measure_iters):
         # full_cycle: _preprocess_stage -> _inference_stage -> _postprocess_stage.
-        # Input ndarrays come from ``in_mem`` (one fresh batch generated before
-        # the timed loop); the timed region starts at preprocess so the encoder
-        # + service cost is isolated from the input-prep cost (which lives in
-        # its own ``input_gen_and_load`` stage). End-to-end: also runs the
-        # cos-sim + top-K + alarm event manager.
+        # Input ndarrays come from the pre-generated pool via fresh_batches()
+        # -- each call advances the pool index, so every measure iter (and
+        # each of full/half within it) sees a different B-slice. The timed
+        # region starts at preprocess so the encoder + service cost is
+        # isolated from the input-prep cost (which lives in its own
+        # ``input_gen_and_load`` stage). End-to-end: also runs the cos-sim
+        # + top-K + alarm event manager.
         def _full():
-            batches = [b.copy() for b in in_mem]
+            batches = fresh_batches()
             x = service._preprocess_stage(batches, user_params)
             v = service._inference_stage(x)
             return service._postprocess_stage(v, batches, stream_ids, user_params)
@@ -242,10 +275,11 @@ def benchmark(
         # half_cycle: _preprocess_stage -> _inference_stage (stops at video
         # emb (B, 1024); no text-side work). PE has TEMPORAL_SIZE = 1, so the
         # per-image visual vector IS the per-stream video embedding. Same
-        # ``in_mem`` start point as full_cycle so the two are directly
-        # comparable; the only difference is the text-side block.
+        # pool-backed fresh_batches() start point as full_cycle so the two
+        # are directly comparable; the only difference is the text-side
+        # block.
         def _half():
-            batches = [b.copy() for b in in_mem]
+            batches = fresh_batches()
             x = service._preprocess_stage(batches, user_params)
             return service._inference_stage(x)
         _, dt = time_call(_half)

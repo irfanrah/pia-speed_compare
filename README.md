@@ -26,14 +26,33 @@ isolated from input materialization.
 | `half_cycle` | `_preprocess_stage` → … → latest video embedding | video emb `(B, 1024)` | no | **no** |
 | `full_cycle` | `_preprocess_stage` → end-to-end production tick | alarm decision | no | yes |
 | `input_gen_and_load` | isolated cost of producing B `(1080, 1920, 3)` uint8 ndarrays | B ndarrays | yes | no |
-| `cos_sim` | isolated text-side block (L2 norm + cos-sim vs text features + alarm event manager) | alarms dict | no | yes |
+| `cos_sim` | isolated cos-sim **dot product** vs text features | sim tensors | no | yes |
 
 `full_cycle` and `half_cycle` BOTH start at `_preprocess_stage` with batches
-sourced from `in_mem` (one fresh batch generated once before the timed
-loop). The rule of thumb: **the moment any text embedding (cos-sim vs text
+drawn from a **pre-generated input pool** — a one-time-allocated list of
+unique random `(1080, 1920, 3)` uint8 ndarrays sized to cover every B-batch
+consumer in the bench (setup + warmup + buffer_warmup + 2 × measure_iters
+for full/half). `fresh_batches()` advances a pool index per call, so every
+iter and every stage within an iter sees disjoint random data — no shared
+template, no cached frame, no two consumers looking at the same pixels.
+
+The rule of thumb: **the moment any text embedding (cos-sim vs text
 features, top-K, alarm event manager) is involved, the timing is no longer
 `half_cycle` — it's `full_cycle`.** Inputs are randomly generated, so there
 is no disk I/O at any point in the bench.
+
+**Pool sizing** (printed at the start of every run as `[pool] generated N
+frames = K batches × B  (X GB)`):
+
+```
+PE                : n_batches = 1 + warmup_iters + 2 × measure_iters
+FT_PE / FT_PE_INT8: n_batches = 2 + (TEMPORAL_SIZE + T + 2) + warmup_iters + 2 × measure_iters
+pool_bytes        = n_batches × B × (1080 × 1920 × 3) ≈ n_batches × B × 6.2 MB
+```
+
+Typical: B=16, T=3, warmup=5, iters=25 → ~1 GB. At the upper end (B=128
+on the dynamic FT_PE_INT8 engine) it climbs into the multi-GB range — the
+pool-size banner lets you see the cost before activations land on GPU.
 
 Subtraction games:
 
@@ -82,9 +101,9 @@ ordered work units; `✓` = included in that stage's timed region, `—` = not.
 ┌──────────────────────────────────────────────────────────────────┬──────┬──────┬───────────┬───────────┬─────────┐
 │                              Step                                │ full │ half │ inference │ input_gen │ cos_sim │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
-│ gen_random_frame × B   (RNG → uint8 (1080,1920,3))               │  —   │  —   │     —     │     ✓     │    —    │
+│ gen_random_frame × B  (RNG → uint8 (1080,1920,3), fresh per call)│  —   │  —   │     —     │     ✓     │    —    │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
-│ [b.copy() for b in in_mem]  (input ndarrays from upstream)       │  ✓   │  ✓   │     —     │     —     │    —    │
+│ fresh_batches()  (next B from pre-generated pool, .copy()-d)     │  ✓   │  ✓   │     —     │     —     │    —    │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
 │ pre-cooked (B, 3, H, W) CUDA tensor  (reused across iters)       │  —   │  —   │     ✓     │     —     │    —    │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
@@ -127,9 +146,9 @@ tick triggers an encode.
 ┌──────────────────────────────────────────────────────────────────┬──────┬──────┬───────────┬───────────┬─────────┐
 │                              Step                                │ full │ half │ inference │ input_gen │ cos_sim │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
-│ gen_random_frame × B   (RNG → uint8 (1080,1920,3))               │  —   │  —   │     —     │     ✓     │    —    │
+│ gen_random_frame × B  (RNG → uint8 (1080,1920,3), fresh per call)│  —   │  —   │     —     │     ✓     │    —    │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
-│ [b.copy() for b in in_mem]   (input ndarrays from upstream)      │  ✓   │  ✓   │     —     │     —     │    —    │
+│ fresh_batches()  (next B from pre-generated pool, .copy()-d)     │  ✓   │  ✓   │     —     │     —     │    —    │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
 │ pre-cooked (B, T, 3, H, W) CUDA tensor  (reused across iters)    │  —   │  —   │     ✓     │     —     │    —    │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤

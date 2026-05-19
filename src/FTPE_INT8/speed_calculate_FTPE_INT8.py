@@ -21,8 +21,9 @@ the ``(B_enc * T, 1024)`` output back to ``(B_enc, T, 1024)``.
 
 Stage convention (shared with src/speed_calculate_FTPE.py):
     full_cycle           _preprocess_stage -> _postprocess_stage (vision +
-                         text). Timed from preprocess; inputs come from the
-                         pre-generated ``in_mem`` buffer.
+                         text). Timed from preprocess; inputs come from a
+                         pre-generated random ndarray pool via
+                         ``fresh_batches()``.
     half_cycle           _preprocess_stage(B) -> gather buffer + model +
                          frame buffer + per-stream mean-pool. Stops at
                          video_emb (B, 1024). Same start point as full.
@@ -334,9 +335,38 @@ def benchmark(
 
     stream_ids = [f"stream_{i}" for i in range(batch_size)]
     user_params = make_user_params(batch_size)
+
+    # --- Pre-generated input pool ---------------------------------------
+    # Total B-batches consumed in this bench run:
+    #   1                            preprocessed_bt setup (single_tick)
+    #   1                            _half_warm setup (prime cos_sim input)
+    #   (TEMPORAL_SIZE + T + 2)      buffer_warmup ticks of _detect
+    #   warmup_iters                 cache/JIT warmup _detect calls
+    #   2 * measure_iters            measure loop (full + half each iter)
+    buffer_warmup = TEMPORAL_SIZE + frames + 2
+    n_pool_batches = 2 + buffer_warmup + warmup_iters + 2 * measure_iters
+    _pool_rng = np.random.default_rng()
+    pool: list[np.ndarray] = [
+        _pool_rng.integers(0, 256, size=_FRAME_HW, dtype=np.uint8)
+        for _ in range(n_pool_batches * batch_size)
+    ]
+    pool_idx = [0]
+    print(f"[pool] generated {len(pool)} frames "
+          f"= {n_pool_batches} batches × {batch_size}  "
+          f"({len(pool) * np.prod(_FRAME_HW) / 1e9:.2f} GB)  "
+          f"(includes buffer_warmup={buffer_warmup} for T={frames})")
+
     def fresh_batches() -> list[np.ndarray]:
-        # Random per call -- no shared template, no disk I/O.
-        return [gen_random_frame() for _ in range(batch_size)]
+        """Take the next B ndarrays from the pre-generated pool. Each call
+        advances the index so consecutive calls see disjoint slices."""
+        i = pool_idx[0]
+        if i + batch_size > len(pool):
+            print(f"[pool] WARN: exhausted at {len(pool)} frames; wrapping",
+                  file=sys.stderr)
+            i = 0
+        batch = [arr.copy() for arr in pool[i:i + batch_size]]
+        pool_idx[0] = i + batch_size
+        return batch
 
     # Build a (B, T, 3, H, W) tensor for the inference-only stage by
     # expanding one tick's preprocessed batch across the temporal axis.
@@ -400,7 +430,7 @@ def benchmark(
             last = (sim_abn, sim_nrm)
         return last
 
-    buffer_warmup = TEMPORAL_SIZE + service.window_size + 2
+    # Pool sizing above already reserved ``buffer_warmup`` batches here.
     for _ in range(buffer_warmup):
         service._detect(
             batches=fresh_batches(), stream_ids=stream_ids, user_params=user_params,
@@ -423,8 +453,6 @@ def benchmark(
     per_iter_temp: list[float | None] = []
     t_start = query_gpu_temp_c()
 
-    in_mem = fresh_batches()  # ndarrays handed in from upstream (camera, RNG, ...)
-
     # Capture a (B, 1024) video_embeddings tensor for the cos_sim stage.
     # The text-side block doesn't care about the values -- the matmul cost
     # is shape-only -- so one tick's post-warmup video emb is a fine input.
@@ -436,22 +464,24 @@ def benchmark(
     fixed_video_embs = _half_warm.detach()
 
     for _ in range(measure_iters):
-        # full_cycle: _detect starting from in-mem ndarrays (preprocess +
-        # gather/frame buffers + INT8 model + per-stream mean + L2 norm +
-        # per-category cos-sim + alarm event manager).
+        # full_cycle: _detect starting from a fresh pool draw (preprocess
+        # + gather/frame buffers + INT8 model + per-stream mean + L2 norm
+        # + per-category cos-sim + alarm event manager). Each fresh_batches()
+        # call returns a new B-slice of the pool, so every measure iter
+        # (and each of full/half within it) sees disjoint random data.
         def _full():
-            batches = [b.copy() for b in in_mem]
+            batches = fresh_batches()
             return service._detect(
                 batches=batches, stream_ids=stream_ids, user_params=user_params,
             )
         _, dt = time_call(_full)
         samples["full_cycle"].append(dt * 1000.0)
 
-        # half_cycle: same start point (preprocess on in-mem ndarrays),
-        # stops at the per-stream video emb (B, 1024). Only difference from
+        # half_cycle: same pool-backed start point as full_cycle, stops at
+        # the per-stream video emb (B, 1024). Only difference from
         # full_cycle is the text-side block.
         def _half():
-            batches = [b.copy() for b in in_mem]
+            batches = fresh_batches()
             x = service._preprocess_stage(batches, user_params)
             return _postprocess_to_video_emb(x, stream_ids)
         _, dt = time_call(_half)
