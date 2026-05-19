@@ -15,19 +15,26 @@ scripts/plot_results.sh           → src/plot_results.py        (results/*.json
 
 ## Stage convention
 
-Each script reports three stages per run. The dividing principle is **video
-side vs text side**:
+Each script reports four stages per run. The dividing principle is **video
+side vs text side**, with `three_quarters_cycle` factoring out the disk-read
+cost:
 
-| Stage | Scope | Output | Includes text-side work? |
-|---|---|---|---|
-| `inference` | pure encoder model compute on a pre-cooked CUDA tensor | per-frame img emb | no |
-| `half_cycle` | everything **up to the latest video embedding** | video emb `(B, 1024)` | **no** |
-| `full_cycle` | one end-to-end production tick | alarm decision | yes |
+| Stage | Scope | Output | Disk read? | Text side? |
+|---|---|---|---|---|
+| `inference` | pure encoder model compute on a pre-cooked CUDA tensor | per-frame img emb | no | no |
+| `half_cycle` | everything **up to the latest video embedding** | video emb `(B, 1024)` | yes | **no** |
+| `three_quarters_cycle` | one production tick **minus disk read** | alarm decision | **no** | yes |
+| `full_cycle` | one end-to-end production tick | alarm decision | yes | yes |
 
 The rule of thumb: **the moment any text embedding (cos-sim vs text features,
 top-K, alarm event manager) is involved, the timing is no longer `half_cycle`
-— it's `full_cycle`.** This boundary is what makes the PE and FT_PE
-half_cycle numbers semantically comparable.
+— it's `full_cycle` / `three_quarters_cycle`.** This boundary is what makes
+the PE and FT_PE half_cycle numbers semantically comparable.
+
+`three_quarters_cycle` answers "how fast is one production tick when frames
+are already in RAM" (e.g. an RTSP grabber hands you decoded ndarrays, no
+local disk I/O). `full_cycle - three_quarters_cycle` is therefore the
+isolated disk-read cost.
 
 ### What "video embedding" means in each pipeline
 
@@ -60,45 +67,98 @@ Concretely, `_postprocess_stage` does two things in sequence per tick:
 
 ## Stage detail
 
+Step-by-step view of what each tick-based stage runs. Rows are the ordered
+work units inside one timed call; `✓` = included, `—` = skipped.
+
 ### PE (`src/speed_calculate_PE.py`)
 
 ```
-full_cycle : disk read → cv_bgr2rgb + ROI + preprocess_image
-                       → TRT model           → (B, 1024)
-                       → deque append → cos-sim vs text → top-K → alarm
-half_cycle : in-mem ndarray → cv_bgr2rgb + ROI + preprocess_image
-                            → TRT model      → (B, 1024)                ← stops here
-inference  : pre-cooked (B, 3, H, W) tensor → TRT model → (B, 1024)
+┌───────────────────────────────────────────────────────────────────┬────────────┬──────────────────────┬─────────────────────────────────┐
+│                               Step                                │ full_cycle │ three_quarters_cycle │           half_cycle            │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ disk read (load_image_ndarray × B)                                │ ✓          │ —                    │ ✓                               │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ [b.copy() for b in in_mem]                                        │ —          │ ✓                    │ —                               │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ _preprocess_stage (cv_bgr2rgb + ROI + preprocess_image)           │ ✓          │ ✓                    │ ✓                               │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ _inference_stage → TRT model → (B, 1024)                          │ ✓          │ ✓                    │ ✓ stops here, returns (B, 1024) │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ deque append per stream (stream_vector_queues, maxlen=1)          │ ✓          │ ✓                    │ —                               │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ alarm_event_manager: mean-pool + sim = mean @ gpu_vectors.T       │ ✓          │ ✓                    │ —                               │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ _decide_top_category_opt (TOP_CANDIDATE=13)                       │ ✓          │ ✓                    │ —                               │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ process_category: append 1/0 to duration_queue per retEvent key   │ ✓          │ ✓                    │ —                               │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ check_alarm_duration: STATUS_TRANSITION → alarms dict             │ ✓          │ ✓                    │ —                               │
+└───────────────────────────────────────────────────────────────────┴────────────┴──────────────────────┴─────────────────────────────────┘
 ```
+
+`inference` is the model-only stage: pre-cooked `(B, 3, H, W)` CUDA tensor →
+TRT model → `(B, 1024)`. It does not touch service state.
 
 ### FT_PE (`src/speed_calculate_FTPE.py`)
 
 `--frames T` drives the temporal-window dimension. The bench forces
-`stride = 1` (sliding_window_size = T-1, prediction_size = 1) so every tick
-triggers an encode.
+`stride = 1` (`sliding_window_size = T-1`, `prediction_size = 1`) so every
+tick triggers an encode.
 
 ```
-full_cycle : disk read → _preprocess_stage(B)
-                       → per-stream gather buffer (window_size=T)
-                       → TRT model                  → (B, T, 1024)
-                       → per-stream frame_buffer (TEMPORAL_SIZE=8)
-                       → mean-pool                  → (B, 1024)
-                       → L2 norm → per-class cos-sim → alarm
-half_cycle : in-mem B*T ndarrays → _preprocess_stage(B*T)
-                                 → view (B, T, 3, H, W)
-                                 → TRT model         → (B, T, 1024)
-                                 → per-stream stack TEMPORAL_SIZE entries
-                                   (TEMPORAL_SIZE - prediction_size of them
-                                   are pre-filled outside the timed region)
-                                 → mean-pool         → (B, 1024)        ← stops here
-inference  : pre-cooked (B, T, 3, H, W) tensor → TRT model → (B, T, 1024)
+┌───────────────────────────────────────────────────────────────────┬────────────┬──────────────────────┬─────────────────────────────────┐
+│                               Step                                │ full_cycle │ three_quarters_cycle │           half_cycle            │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ disk read (load_image_ndarray × B)                                │ ✓          │ —                    │ ✓                               │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ [b.copy() for b in in_mem]                                        │ —          │ ✓                    │ —                               │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ _preprocess_stage (cv_bgr2rgb + ROI + preprocess_image)           │ ✓          │ ✓                    │ ✓                               │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ gather_frame_buffers append (same service state across stages)    │ ✓          │ ✓                    │ ✓                               │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ window check + torch.stack(gather) → (B_enc, T, ...)              │ ✓          │ ✓                    │ ✓                               │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ _inference_stage → TRT model → (B_enc, T, 1024) + L2 norm         │ ✓          │ ✓                    │ ✓                               │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ frame_buffers extend + rotate (del [1] if > TEMPORAL_SIZE)        │ ✓          │ ✓                    │ ✓                               │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ per-stream torch.stack(list(buf)).mean(dim=0) → video_emb (1024,) │ ✓          │ ✓                    │ ✓ stops here, returns (B, 1024) │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ torch.stack video_emb across streams + L2 norm                    │ ✓          │ ✓                    │ —                               │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ per-class cos-sim (vis @ category_txt_vectors[c] and normals)     │ ✓          │ ✓                    │ —                               │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ (sim_abn_max > sim_nrm_max).cpu().tolist() per category           │ ✓          │ ✓                    │ —                               │
+├───────────────────────────────────────────────────────────────────┼────────────┼──────────────────────┼─────────────────────────────────┤
+│ alarm_event_manager.update                                        │ ✓          │ ✓                    │ —                               │
+└───────────────────────────────────────────────────────────────────┴────────────┴──────────────────────┴─────────────────────────────────┘
 ```
 
-The half_cycle is **synthetic**: production never preprocesses B*T frames in
-a single call. The bench bundles them so the timed iter pays one tick's
-encode + one tick's mean-pool without having to simulate the gather buffer
-filling across many ticks. The pre-filled history outside the timed region
-keeps the mean-pool's `stack(...)` cost realistic.
+`inference` is the model-only stage: pre-cooked `(B, T, 3, H, W)` CUDA tensor
+→ TRT model → `(B, T, 1024)`. It does not touch service state.
+
+`full_cycle`, `three_quarters_cycle`, and `half_cycle` are all **one
+production tick** — they share the same `service.gather_frame_buffers` and
+`service.frame_buffers` state, which is primed once during warmup and
+advanced by one tick per timed call. The earlier "synthetic B×T bulk
+preprocess" definition was scrapped: it inflated half_cycle's preprocess
+work T× relative to a real tick and produced the nonsensical `half > full`
+ordering at `T > 1`.
+
+## Diff equations (subtraction games)
+
+```
+full        − three_quarters   ≈ disk read cost
+                                  (PIL.Image.open + decode + np.array for B frames)
+full        − half             = text-side cost
+                                  (L2 norm + per-class cos-sim + alarm event manager)
+three_quart − half             = text-side cost − disk read cost
+                                  (sign depends on which is bigger)
+```
+
+By construction: `half_cycle ≤ full_cycle` and `three_quarters_cycle ≤
+full_cycle`.
 
 ## Throughput unit
 
@@ -112,9 +172,10 @@ per second** = `B * T * 1000 / mean_ms`.
   — same as half_cycle / inference. The numbers are directly comparable.
 
 The **production input rate** (unique frames ingested per second) is
-reported separately as `throughput.full_cycle_streams_per_s = B * 1000 /
-mean_ms` for FT_PE only. PE has no separate streams-per-second key because
-it equals `full_cycle_imgs_per_s`.
+reported separately as `throughput.full_cycle_streams_per_s` and
+`throughput.half_cycle_streams_per_s` (= `B * 1000 / mean_ms`) for FT_PE
+only. PE has no separate streams-per-second key because it equals
+`*_imgs_per_s`.
 
 ## ROI / retEvent shape
 

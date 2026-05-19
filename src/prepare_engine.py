@@ -7,9 +7,9 @@ here are byte-compatible with what the production services consume.
 Usage:
     python3 src/prepare_engine.py --kind pe \
         --hf-repo PIA-SPACE-LAB/PE-Core-L14-336 \
-        --hf-file onnx/PE-Core-L14-336_vision_dynamic.onnx \
-        --onnx  assets/model/PE-Core-L14-336_vision_dynamic.onnx \
-        --engine assets/model/PE-Core-L14-336_vision_dynamic.engine
+        --hf-file PE-Core-L14-336.onnx \
+        --onnx  assets/model/PE-Core-L14-336.onnx \
+        --engine assets/model/PE-Core-L14-336.engine
 
     python3 src/prepare_engine.py --kind ftpe \
         --hf-repo <repo> --hf-file <file.onnx> \

@@ -1,7 +1,7 @@
 """Speed benchmark for perception_encoder via the real PEService pipeline.
 
 Instantiates ``pia_prod.AI.modules.perception_encoder.service.PEService`` and
-times the three split stages exposed in ``_detect`` -- the same code path
+times four split stages exposed in ``_detect`` -- the same code path
 production runs.
 
 Stage boundary convention (shared with the FT_PE bench):
@@ -9,18 +9,26 @@ Stage boundary convention (shared with the FT_PE bench):
       including the latest per-stream **video embedding** ``(B, 1024)``. PE
       has no temporal model and ``TEMPORAL_SIZE = 1``, so the per-stream
       video embedding is the per-image visual vector itself.
+    * ``three_quarters_cycle`` is identical to ``full_cycle`` minus the disk
+      read -- frames are already in RAM (e.g. handed in by a camera buffer)
+      when the timed call starts.
     * The moment any text-side work runs (text embeddings, cos-sim against
       text features, top-K, alarm event manager), the timing is no longer
-      ``half_cycle`` -- that work lives only in ``full_cycle``.
+      ``half_cycle`` -- that work lives only in the full/three-quarters
+      stages.
 
-    full_cycle:  disk read -> _preprocess_stage -> _inference_stage
-                 -> _postprocess_stage
-                 (end-to-end: deque append -> cos sim vs text features
-                  -> top-K -> duration-queue alarm)
-    half_cycle:  in-memory ndarray -> _preprocess_stage -> _inference_stage
-                 (stops at video emb (B, 1024); no text-side work)
-    inference:   already-preprocessed CUDA tensor -> _inference_stage
-                 (stops at visual emb (B, 1024); no preprocess, no text)
+    full_cycle:            disk read -> _preprocess_stage -> _inference_stage
+                           -> _postprocess_stage
+                           (end-to-end: deque append -> cos sim vs text
+                            features -> top-K -> duration-queue alarm)
+    three_quarters_cycle:  in-memory ndarray -> _preprocess_stage
+                           -> _inference_stage -> _postprocess_stage
+                           (full_cycle minus disk read)
+    half_cycle:            disk read -> _preprocess_stage -> _inference_stage
+                           (stops at video emb (B, 1024); no text-side work)
+    inference:             already-preprocessed CUDA tensor -> _inference_stage
+                           (stops at visual emb (B, 1024); no preprocess,
+                            no text)
 
 GPU temperature is polled per iter via NVML when ``pynvml`` is installed,
 falling back to nvidia-smi otherwise.
@@ -44,7 +52,7 @@ from PIL import Image
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src" / "Product-AI-mono" / "packages"))
 
-DEFAULT_ENGINE = REPO_ROOT / "assets" / "model" / "PE-Core-L14-336_vision_dynamic.engine"
+DEFAULT_ENGINE = REPO_ROOT / "assets" / "model" / "PE-Core-L14-336.engine"
 DEFAULT_TXT = REPO_ROOT / "assets" / "model" / "text_features.json"
 DEFAULT_IMAGE = REPO_ROOT / "assets" / "images" / "kkpolice_1.jpg"
 DEFAULT_RESULTS_DIR = REPO_ROOT / "results"
@@ -184,7 +192,12 @@ def benchmark(
         _ = service._postprocess_stage(v, batches, stream_ids, user_params)
     torch.cuda.synchronize()
 
-    samples = {"full_cycle": [], "half_cycle": [], "inference": []}
+    samples = {
+        "full_cycle": [],
+        "three_quarters_cycle": [],
+        "half_cycle": [],
+        "inference": [],
+    }
     per_iter_temp: list[float | None] = []
     t_start = query_gpu_temp_c()
 
@@ -201,16 +214,27 @@ def benchmark(
         _, dt = time_call(_full)
         samples["full_cycle"].append(dt * 1000.0)
 
-        # half_cycle: in-memory ndarray -> preprocess -> inference (stops at img emb).
-        # The .copy() simulates production receiving a fresh frame each tick.
-        def _half():
+        # three_quarters_cycle: same as full_cycle minus disk read. Starts
+        # from an in-memory ndarray (frames already in RAM).
+        def _three_quarters():
             batches = [b.copy() for b in in_mem]
+            x = service._preprocess_stage(batches, user_params)
+            v = service._inference_stage(x)
+            return service._postprocess_stage(v, batches, stream_ids, user_params)
+        _, dt = time_call(_three_quarters)
+        samples["three_quarters_cycle"].append(dt * 1000.0)
+
+        # half_cycle: disk read -> preprocess -> inference (stops at video
+        # emb (B, 1024); no text-side work). PE has TEMPORAL_SIZE = 1, so
+        # the per-image visual vector IS the per-stream video embedding.
+        def _half():
+            batches = [load_image_ndarray(image_path) for _ in range(batch_size)]
             x = service._preprocess_stage(batches, user_params)
             return service._inference_stage(x)
         _, dt = time_call(_half)
         samples["half_cycle"].append(dt * 1000.0)
 
-        # inference: preprocessed CUDA tensor -> inference (stops at img emb).
+        # inference: preprocessed CUDA tensor -> inference (stops at video emb).
         _, dt = time_call(lambda: service._inference_stage(preprocessed))
         samples["inference"].append(dt * 1000.0)
 
@@ -226,10 +250,11 @@ def benchmark(
     }
     iterations = {
         "iter": list(range(measure_iters)),
-        "full_cycle_ms": [round(v, 3) for v in samples["full_cycle"]],
-        "half_cycle_ms": [round(v, 3) for v in samples["half_cycle"]],
-        "inference_ms":  [round(v, 3) for v in samples["inference"]],
-        "gpu_temp_c":    [round(t, 1) if t is not None else None for t in per_iter_temp],
+        "full_cycle_ms":           [round(v, 3) for v in samples["full_cycle"]],
+        "three_quarters_cycle_ms": [round(v, 3) for v in samples["three_quarters_cycle"]],
+        "half_cycle_ms":           [round(v, 3) for v in samples["half_cycle"]],
+        "inference_ms":            [round(v, 3) for v in samples["inference"]],
+        "gpu_temp_c":              [round(t, 1) if t is not None else None for t in per_iter_temp],
     }
 
     return {
