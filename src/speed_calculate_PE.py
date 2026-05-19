@@ -17,29 +17,28 @@ Stage boundary convention (shared with the FT_PE bench):
       ``half_cycle`` -- that work lives only in the full/three-quarters
       stages.
 
-    full_cycle:            input gen -> _preprocess_stage -> _inference_stage
-                           -> _postprocess_stage
-                           (end-to-end: deque append -> cos sim vs text
-                            features -> top-K -> duration-queue alarm)
-    three_quarters_cycle:  in-memory ndarray -> _preprocess_stage
-                           -> _inference_stage -> _postprocess_stage
-                           (full_cycle minus input gen)
-    half_cycle:            input gen -> _preprocess_stage -> _inference_stage
-                           (stops at video emb (B, 1024); no text-side work)
-    inference:             already-preprocessed CUDA tensor -> _inference_stage
-                           (stops at visual emb (B, 1024); no preprocess,
-                            no text)
-    input_gen:             isolated cost of generating B random 1080p uint8
-                           ndarrays (no disk I/O)
-    cos_sim:               isolated text-side block (mean-pool + cos sim vs
-                           text features + top-K + alarm event manager)
+    full_cycle:           _preprocess_stage -> _inference_stage
+                          -> _postprocess_stage
+                          (end-to-end from preprocess: deque append ->
+                           cos sim vs text features -> top-K ->
+                           duration-queue alarm)
+    half_cycle:           _preprocess_stage -> _inference_stage
+                          (stops at video emb (B, 1024); no text-side work)
+    inference:            already-preprocessed CUDA tensor -> _inference_stage
+                          (stops at visual emb (B, 1024); no preprocess,
+                           no text)
+    input_gen_and_load:   isolated cost of producing B random 1080p uint8
+                          ndarrays (the "load from disk / camera buffer"
+                          stand-in at the start of a production tick)
+    cos_sim:              isolated text-side block (mean-pool + cos sim vs
+                          text features + top-K + alarm event manager)
 
-Inputs are now **randomly generated** at each tick rather than read from disk.
-Each call to ``gen_random_frame()`` returns a fresh (1080, 1920, 3) uint8
-ndarray with new RNG-derived pixels, so per-iter and per-B-position inputs
-all differ -- removes the disk-I/O bottleneck the prior PIL-decode path
-imposed at high batch sizes. The ``--image`` CLI flag is preserved for
-backwards compat but is ignored.
+The timed regions for ``full_cycle`` and ``half_cycle`` BOTH start at
+``_preprocess_stage`` with batches sourced from ``in_mem`` (a single fresh
+batch generated once before the timed loop). Input-prep cost is measured
+separately as ``input_gen_and_load`` so encoder + service work can be
+isolated cleanly. Inputs are randomly generated (no disk I/O); the
+``--image`` CLI flag is preserved for backwards compat but ignored.
 
 GPU temperature is polled per iter via NVML when ``pynvml`` is installed,
 falling back to nvidia-smi otherwise.
@@ -218,44 +217,38 @@ def benchmark(
 
     samples = {
         "full_cycle": [],
-        "three_quarters_cycle": [],
         "half_cycle": [],
         "inference": [],
-        "input_gen": [],
+        "input_gen_and_load": [],
         "cos_sim": [],
     }
     per_iter_temp: list[float | None] = []
     t_start = query_gpu_temp_c()
 
-    in_mem = fresh_batches()  # the "ndarray already in RAM" baseline buffer
+    in_mem = fresh_batches()  # ndarrays handed in from upstream (camera, RNG, ...)
 
     for _ in range(measure_iters):
-        # full_cycle: input gen -> preprocess -> inference -> postprocess.
-        # End-to-end: also runs the cos-sim + top-K + alarm event manager.
+        # full_cycle: _preprocess_stage -> _inference_stage -> _postprocess_stage.
+        # Input ndarrays come from ``in_mem`` (one fresh batch generated before
+        # the timed loop); the timed region starts at preprocess so the encoder
+        # + service cost is isolated from the input-prep cost (which lives in
+        # its own ``input_gen_and_load`` stage). End-to-end: also runs the
+        # cos-sim + top-K + alarm event manager.
         def _full():
-            batches = [gen_random_frame() for _ in range(batch_size)]
+            batches = [b.copy() for b in in_mem]
             x = service._preprocess_stage(batches, user_params)
             v = service._inference_stage(x)
             return service._postprocess_stage(v, batches, stream_ids, user_params)
         _, dt = time_call(_full)
         samples["full_cycle"].append(dt * 1000.0)
 
-        # three_quarters_cycle: same as full_cycle minus input gen. Starts
-        # from an in-memory ndarray (frames already in RAM, the in_mem buffer
-        # was generated once before the timed loop).
-        def _three_quarters():
-            batches = [b.copy() for b in in_mem]
-            x = service._preprocess_stage(batches, user_params)
-            v = service._inference_stage(x)
-            return service._postprocess_stage(v, batches, stream_ids, user_params)
-        _, dt = time_call(_three_quarters)
-        samples["three_quarters_cycle"].append(dt * 1000.0)
-
-        # half_cycle: input gen -> preprocess -> inference (stops at video
-        # emb (B, 1024); no text-side work). PE has TEMPORAL_SIZE = 1, so
-        # the per-image visual vector IS the per-stream video embedding.
+        # half_cycle: _preprocess_stage -> _inference_stage (stops at video
+        # emb (B, 1024); no text-side work). PE has TEMPORAL_SIZE = 1, so the
+        # per-image visual vector IS the per-stream video embedding. Same
+        # ``in_mem`` start point as full_cycle so the two are directly
+        # comparable; the only difference is the text-side block.
         def _half():
-            batches = [gen_random_frame() for _ in range(batch_size)]
+            batches = [b.copy() for b in in_mem]
             x = service._preprocess_stage(batches, user_params)
             return service._inference_stage(x)
         _, dt = time_call(_half)
@@ -265,14 +258,14 @@ def benchmark(
         _, dt = time_call(lambda: service._inference_stage(preprocessed))
         samples["inference"].append(dt * 1000.0)
 
-        # input_gen: isolated cost of generating B random (1080, 1920, 3)
-        # uint8 ndarrays for one tick's input. Equals full_cycle minus
-        # three_quarters_cycle in expectation. Replaces the old disk_read
-        # stage now that the bench no longer touches disk.
+        # input_gen_and_load: isolated cost of producing B (1080, 1920, 3)
+        # uint8 ndarrays for one tick's input. Random gen here -- the same
+        # call also serves as the "load from disk / camera buffer" stand-in
+        # at the start of a production tick.
         _, dt = time_call(
             lambda: [gen_random_frame() for _ in range(batch_size)]
         )
-        samples["input_gen"].append(dt * 1000.0)
+        samples["input_gen_and_load"].append(dt * 1000.0)
 
         # cos_sim: isolated cost of the text-side block. PEEventManager.update
         # does mean-pool over the per-stream deque, cos-sim vs text features,
@@ -299,13 +292,12 @@ def benchmark(
     }
     iterations = {
         "iter": list(range(measure_iters)),
-        "full_cycle_ms":           [round(v, 3) for v in samples["full_cycle"]],
-        "three_quarters_cycle_ms": [round(v, 3) for v in samples["three_quarters_cycle"]],
-        "half_cycle_ms":           [round(v, 3) for v in samples["half_cycle"]],
-        "inference_ms":            [round(v, 3) for v in samples["inference"]],
-        "input_gen_ms":            [round(v, 3) for v in samples["input_gen"]],
-        "cos_sim_ms":              [round(v, 3) for v in samples["cos_sim"]],
-        "gpu_temp_c":              [round(t, 1) if t is not None else None for t in per_iter_temp],
+        "full_cycle_ms":          [round(v, 3) for v in samples["full_cycle"]],
+        "half_cycle_ms":          [round(v, 3) for v in samples["half_cycle"]],
+        "inference_ms":           [round(v, 3) for v in samples["inference"]],
+        "input_gen_and_load_ms":  [round(v, 3) for v in samples["input_gen_and_load"]],
+        "cos_sim_ms":             [round(v, 3) for v in samples["cos_sim"]],
+        "gpu_temp_c":             [round(t, 1) if t is not None else None for t in per_iter_temp],
     }
 
     return {

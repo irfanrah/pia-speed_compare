@@ -1,7 +1,7 @@
 """Speed benchmark for FT_PE INT8 (T=3) via the real FTPEService pipeline.
 
-Drop-in twin of ``src/speed_calculate_FTPE.py``. Same four-stage harness
-(full_cycle / three_quarters_cycle / half_cycle / inference), same
+Drop-in twin of ``src/speed_calculate_FTPE.py``. Same five-stage harness
+(full_cycle / half_cycle / inference / input_gen_and_load / cos_sim), same
 production-tick semantics, same ``service.gather_frame_buffers`` /
 ``service.frame_buffers`` advance per call -- the only difference is the
 TRT engine plugged into ``service._inference_stage``.
@@ -20,13 +20,19 @@ that flattens to ``(B_enc * T, ...)`` for the engine call and unflattens
 the ``(B_enc * T, 1024)`` output back to ``(B_enc, T, 1024)``.
 
 Stage convention (shared with src/speed_calculate_FTPE.py):
-    * ``half_cycle`` = one production tick of the vision side, stopping
-      at the per-stream video embedding ``(B, 1024)``.
-    * ``full_cycle`` = same tick + the text-side block (L2 norm +
-      per-class cos-sim + alarm event manager).
-    * ``three_quarters_cycle`` = ``full_cycle`` minus the disk read.
-    * ``inference`` = pre-cooked ``(B, T, 3, H, W)`` CUDA tensor through
-      the adapter (which flattens to ``(B*T, 3, H, W)`` for the engine).
+    full_cycle           _preprocess_stage -> _postprocess_stage (vision +
+                         text). Timed from preprocess; inputs come from the
+                         pre-generated ``in_mem`` buffer.
+    half_cycle           _preprocess_stage(B) -> gather buffer + model +
+                         frame buffer + per-stream mean-pool. Stops at
+                         video_emb (B, 1024). Same start point as full.
+    inference            pre-cooked (B, T, 3, H, W) CUDA tensor through
+                         the adapter (flattens to (B*T, 3, H, W) for the
+                         INT8 engine).
+    input_gen_and_load   isolated cost of B random 1080p uint8 ndarrays
+                         ("load from disk / camera buffer" stand-in).
+    cos_sim              isolated text-side block (L2 norm + per-class
+                         cos-sim + alarm event manager).
 
 Build the engine first via ``src/FTPE_INT8/scripts/run_on_a4000.sh`` and
 point this script at the resulting ``int8_*_crl.engine`` (see README).
@@ -238,8 +244,20 @@ def gpu_info(device_index: int = 0) -> dict:
     }
 
 
+_FRAME_RNG = np.random.default_rng()
+_FRAME_HW = (1080, 1920, 3)  # match a typical 1080p RGB camera frame
+
+
+def gen_random_frame() -> np.ndarray:
+    """Generate a fresh (1080, 1920, 3) uint8 ndarray. Each call returns
+    different pixel values (RNG state advances), so per-iter and per-B
+    inputs vary -- no disk I/O, no cached template."""
+    return _FRAME_RNG.integers(0, 256, size=_FRAME_HW, dtype=np.uint8)
+
+
 def load_image_ndarray(path: Path) -> np.ndarray:
-    return np.array(Image.open(path).convert("RGB"), copy=True)
+    """Backwards-compat shim. Path arg ignored; returns random ndarray."""
+    return gen_random_frame()
 
 
 def stats(samples_ms: list[float]) -> dict:
@@ -316,10 +334,9 @@ def benchmark(
 
     stream_ids = [f"stream_{i}" for i in range(batch_size)]
     user_params = make_user_params(batch_size)
-    template = load_image_ndarray(image_path)
-
     def fresh_batches() -> list[np.ndarray]:
-        return [template.copy() for _ in range(batch_size)]
+        # Random per call -- no shared template, no disk I/O.
+        return [gen_random_frame() for _ in range(batch_size)]
 
     # Build a (B, T, 3, H, W) tensor for the inference-only stage by
     # expanding one tick's preprocessed batch across the temporal axis.
@@ -407,16 +424,15 @@ def benchmark(
 
     samples = {
         "full_cycle": [],
-        "three_quarters_cycle": [],
         "half_cycle": [],
         "inference": [],
-        "disk_read": [],
+        "input_gen_and_load": [],
         "cos_sim": [],
     }
     per_iter_temp: list[float | None] = []
     t_start = query_gpu_temp_c()
 
-    in_mem = fresh_batches()
+    in_mem = fresh_batches()  # ndarrays handed in from upstream (camera, RNG, ...)
 
     # Capture a (B, 1024) video_embeddings tensor for the cos_sim stage.
     # The text-side block doesn't care about the values -- the matmul cost
@@ -429,42 +445,41 @@ def benchmark(
     fixed_video_embs = _half_warm.detach()
 
     for _ in range(measure_iters):
+        # full_cycle: _detect starting from in-mem ndarrays (preprocess +
+        # gather/frame buffers + INT8 model + per-stream mean + L2 norm +
+        # per-category cos-sim + alarm event manager).
         def _full():
-            batches = [load_image_ndarray(image_path) for _ in range(batch_size)]
+            batches = [b.copy() for b in in_mem]
             return service._detect(
                 batches=batches, stream_ids=stream_ids, user_params=user_params,
             )
         _, dt = time_call(_full)
         samples["full_cycle"].append(dt * 1000.0)
 
-        def _three_quarters():
-            batches = [b.copy() for b in in_mem]
-            return service._detect(
-                batches=batches, stream_ids=stream_ids, user_params=user_params,
-            )
-        _, dt = time_call(_three_quarters)
-        samples["three_quarters_cycle"].append(dt * 1000.0)
-
+        # half_cycle: same start point (preprocess on in-mem ndarrays),
+        # stops at the per-stream video emb (B, 1024). Only difference from
+        # full_cycle is the text-side block.
         def _half():
-            batches = [load_image_ndarray(image_path) for _ in range(batch_size)]
+            batches = [b.copy() for b in in_mem]
             x = service._preprocess_stage(batches, user_params)
             return _postprocess_to_video_emb(x, stream_ids)
         _, dt = time_call(_half)
         samples["half_cycle"].append(dt * 1000.0)
 
+        # inference: pre-cooked CUDA tensor -> INT8 engine only.
         _, dt = time_call(lambda: service._inference_stage(preprocessed_bt))
         samples["inference"].append(dt * 1000.0)
 
-        # disk_read: isolated cost of loading B ndarrays from disk
-        # (PIL.Image.open + decode + np.array). ≈ full_cycle − three_quarters_cycle.
+        # input_gen_and_load: isolated cost of producing B (1080, 1920, 3)
+        # uint8 ndarrays per tick (random gen here, equivalent to "load from
+        # disk / camera buffer" at the start of a real tick).
         _, dt = time_call(
-            lambda: [load_image_ndarray(image_path) for _ in range(batch_size)]
+            lambda: [gen_random_frame() for _ in range(batch_size)]
         )
-        samples["disk_read"].append(dt * 1000.0)
+        samples["input_gen_and_load"].append(dt * 1000.0)
 
         # cos_sim: isolated text-side block (L2 norm + 4× per-class cos-sim
-        # vs text features + comparison + alarm event manager). ≈ full_cycle
-        # − half_cycle.
+        # vs text features + comparison + alarm event manager).
         _, dt = time_call(
             lambda: _text_side(fixed_video_embs, stream_ids, user_params)
         )
@@ -481,20 +496,19 @@ def benchmark(
         f"{k}_imgs_per_s": round(total_frames * 1000.0 / stage_stats[k]["mean_ms"], 2)
         for k in samples
     }
-    for k in ("full_cycle", "three_quarters_cycle", "half_cycle"):
+    for k in ("full_cycle", "half_cycle"):
         throughput[f"{k}_streams_per_s"] = round(
             batch_size * 1000.0 / stage_stats[k]["mean_ms"], 2
         )
 
     iterations = {
         "iter": list(range(measure_iters)),
-        "full_cycle_ms":           [round(v, 3) for v in samples["full_cycle"]],
-        "three_quarters_cycle_ms": [round(v, 3) for v in samples["three_quarters_cycle"]],
-        "half_cycle_ms":           [round(v, 3) for v in samples["half_cycle"]],
-        "inference_ms":            [round(v, 3) for v in samples["inference"]],
-        "disk_read_ms":            [round(v, 3) for v in samples["disk_read"]],
-        "cos_sim_ms":              [round(v, 3) for v in samples["cos_sim"]],
-        "gpu_temp_c":              [round(t, 1) if t is not None else None for t in per_iter_temp],
+        "full_cycle_ms":          [round(v, 3) for v in samples["full_cycle"]],
+        "half_cycle_ms":          [round(v, 3) for v in samples["half_cycle"]],
+        "inference_ms":           [round(v, 3) for v in samples["inference"]],
+        "input_gen_and_load_ms":  [round(v, 3) for v in samples["input_gen_and_load"]],
+        "cos_sim_ms":             [round(v, 3) for v in samples["cos_sim"]],
+        "gpu_temp_c":             [round(t, 1) if t is not None else None for t in per_iter_temp],
     }
 
     return {
