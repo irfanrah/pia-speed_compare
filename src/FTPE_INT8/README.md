@@ -63,34 +63,35 @@ the ORT/peft deps before the deploy can run.
 
 ## Workflow
 
-### Step 1 — build the INT8 engine (once)
+The build is **two passes** — a static deploy that validates cos, then a
+dynamic-profile rebuild that lets the bench sweep across batch sizes from
+the same engine.
+
+### Step 1 — static deploy + cos validation (once)
+
+This is the upstream A4000 checklist verbatim: trace ONNX at BT = B*T, build
+BF16 + INT8 + INT8+CRL static engines, calibrate INT8 on val/, bench on
+test/ to confirm cos.
 
 ```bash
-PE_VENDOR=/mnt/nas200_kurnianto/code/pia-prompt_optimization \
+PE_VENDOR=/path/to/pia-prompt_optimization \
 PT_CKPT=/path/to/qat_deploy_fp32.pt \
 DATASET_ROOT=/path/to/clips \
 T_FRAMES=3 BATCH=4 SIGMA_K=2.5 GPU=0 \
-OUT_DIR=$PWD/assets/QAT \
+OUT_DIR=$PWD/assets/QAT/a4000_run \
 bash src/FTPE_INT8/scripts/run_on_a4000.sh
 ```
 
-This produces, under `assets/QAT/` (gitignored):
+Produces, under `assets/QAT/a4000_run/` (gitignored):
 
 ```
 engines/
-├── bf16_b4t3.engine                  ← reference engine for cos comparison
+├── bf16_b4t3.engine                  ← reference for cos comparison
 ├── int8_b4t3.engine                  ← QAT-only INT8
-└── int8_b4t3_crl.engine              ← QAT + CRL (the canonical shipping engine)
+└── int8_b4t3_crl.engine              ← QAT + CRL (canonical static engine)
 ```
 
-Move / symlink the canonical one to where the speed bench expects it:
-
-```bash
-ln -sf "$PWD/assets/QAT/engines/int8_b4t3_crl.engine" \
-       "$PWD/assets/QAT/int8_b4t3_crl.engine"
-```
-
-Acceptance criteria for the deploy (from `docs/A4000_DEPLOY.md` §5):
+Acceptance criteria (from `docs/A4000_DEPLOY.md` §5):
 
 | Engine | Expected cos | Expected ms on A4000 |
 |---|---:|---:|
@@ -102,10 +103,47 @@ Acceptance criteria for the deploy (from `docs/A4000_DEPLOY.md` §5):
 If `bf16_b4t3` cos is **< 0.998**, the build chain is wrong — stop and
 investigate; the INT8 numbers will be meaningless.
 
-### Step 2 — run the four-stage speed bench
+### Step 2 — build the dynamic INT8+CRL engine (once)
+
+Reuses the FP32 dynamic-batch ONNX and `calibration.npy` from Step 1, runs
+CRL pre-pass + modelopt PTQ + surgery + dynamic engine build with a wide
+batch profile. Calibration BT is decoupled from the engine opt BT to
+sidestep the ORT BFC arena 226 MB single-allocation cap (see Known Issues).
 
 ```bash
-BATCH=4 FRAMES=3 ./scripts/speed_calculate_FTPE_INT8.sh
+PE_VENDOR=/path/to/pia-prompt_optimization \
+PT_CKPT=/path/to/qat_deploy_fp32.pt \
+DATASET_ROOT=/path/to/clips \
+T_FRAMES=3 B_MIN=4 B_OPT=16 B_MAX=128 B_CALIB=4 SIGMA_K=2.5 GPU=0 \
+SKIP_BF16=1 \
+bash src/FTPE_INT8/scripts/build_dynamic_crl.sh
+```
+
+Produces, under `assets/QAT/a4000_run_dyn/` (gitignored):
+
+```
+engines/
+└── int8_dyn_b4-128_t3_crl.engine     ← shipping dynamic engine
+```
+
+Copy it to where the bench looks (the wrapper script's `FTPE_INT8_ENGINE`
+default):
+
+```bash
+cp assets/QAT/a4000_run_dyn/engines/int8_dyn_b4-128_t3_crl.engine \
+   assets/QAT/int8_dyn_crl_t3.engine
+```
+
+Profile: `(-1, 3, 336, 336)` with `min=(12, …), opt=(48, …), max=(384, …)`.
+So **any B in `[4, 128]` at T=3 is in range** without rebuilding the engine.
+
+Set `SKIP_BF16=0` if you also want a `bf16_dyn_*.engine` baseline (used for
+the cos validation; adds ~5 min to the build).
+
+### Step 3 — run the four-stage speed bench
+
+```bash
+BATCH=16 FRAMES=3 ./scripts/speed_calculate_FTPE_INT8.sh
 ```
 
 The bench wraps the INT8 engine in an adapter that exposes the
@@ -159,13 +197,32 @@ The INT8+CRL canonical numbers from the source (A6000) are in
 (smaller card, slower memory) but the **speedup ratio vs BF16 should match
 within ±5%**.
 
-## Known issues (carried over from the upstream report)
+## Known issues (carried over from the upstream report, plus what we hit)
 
-- **B=8 INT8 static at T=8** OOMs during modelopt PTQ calibration (`ORT BFC
-  arena 226 MB single-allocation limit`). Not relevant for T=3 at B=4-16.
+- **ORT BFC arena 226 MB single-allocation cap** during modelopt PTQ.
+  ViT-L's GELU/attn intermediate crosses that at BT≥24, so PTQ
+  calibration only fits in memory at BT=12 (B=4 T=3). We work around this
+  by **decoupling `B_CALIB` from `B_OPT`** in `build_dynamic_crl.sh` —
+  calibration at BT=12 keeps the arena happy while the engine optimization
+  profile can still go up to B=128 (BT=384). Same arena cap is what the
+  upstream FT-T8 INT8 known issue and the B=32 INT8 at T=1/3 skip
+  document.
 - **FT-T8 dynamic bench at B≥16** fails with a shape-broadcast error in
   `bench_dynamic.py`. Not relevant — this bundle ships T=3 only.
 - **ZS-T1 dynamic engine cos collapse → 0.4** is unrelated (T=1 path only).
-  T=3 dynamic engines are fine across B=1..32.
+  T=3 dynamic engines are fine across B=1..32 per the upstream report;
+  we extended that to B=1..128 in our local build and the engine produces
+  valid outputs at the max profile.
+- **onnxruntime-gpu doesn't ship its own cuDNN**. Both `run_on_a4000.sh`
+  and `build_dynamic_crl.sh` now prepend the pip-installed `nvidia/*/lib`
+  directories to `LD_LIBRARY_PATH` so ORT's `CUDAExecutionProvider` loads;
+  without that PTQ silently falls back to CPU and the CPU arena OOMs even
+  at BT=12.
+- **A4000 thermal throttling**. The dynamic engine accepts B=4..128 but
+  the A4000 (16 GB, 140 W TDP) saturates thermally well before that — at
+  B=128 the GPU sits at 101 °C for the whole iter. The engine works, the
+  hardware can't sustain it. Useful bench range on this card is roughly
+  B=4..16; bigger batches need an A6000 / A100 with better cooling.
 
-See `docs/FINAL_REPORT_20260519.md` §"Known issues (open)" for the full list.
+See `docs/FINAL_REPORT_20260519.md` §"Known issues (open)" for the full
+upstream list.
