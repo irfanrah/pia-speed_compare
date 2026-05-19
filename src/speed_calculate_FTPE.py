@@ -32,6 +32,10 @@ Stage boundary convention (shared with the PE bench):
                            -> _inference_stage
                            (stops at per-frame img emb (B, T, 1024); no
                             preprocess, no mean-pool, no text)
+    disk_read:             isolated cost of B ndarrays from disk
+                           (PIL.Image.open + decode + np.array)
+    cos_sim:               isolated text-side block (L2 norm + per-class
+                           cos sim vs text features + alarm event manager)
 
 half_cycle and three_quarters_cycle both reuse
 ``service.gather_frame_buffers`` and ``service.frame_buffers``, so each
@@ -98,7 +102,11 @@ from pia.ai.tasks.T2VRet.models.PE.utils.complexity_check import (  # noqa: E402
     get_gpu_stats_nvml,
 )
 from pia_prod.AI.modules.ft_pe.service import FTPEService  # noqa: E402
-from pia_prod.AI.modules.ft_pe.config import IMG_SIZE, TEMPORAL_SIZE  # noqa: E402
+from pia_prod.AI.modules.ft_pe.config import (  # noqa: E402
+    ABNORMAL_CLASS_NAMES,
+    IMG_SIZE,
+    TEMPORAL_SIZE,
+)
 
 
 def query_gpu_temp_c(device_index: int = 0) -> float | None:
@@ -275,6 +283,34 @@ def benchmark(
             return None
         return torch.stack(video_embeddings)                              # (B, 1024)
 
+    # --- Text-side helper for the isolated cos_sim measurement. Mirrors the
+    # block in FTPEService._postprocess_stage from L2 norm through the alarm
+    # event manager update -- everything `full_cycle` does that `half_cycle`
+    # skips. Takes a pre-stacked (B, 1024) video_embeddings tensor so the
+    # timed call measures only the text-side work.
+    def _text_side(video_embeddings_BxD, stream_ids, user_params):
+        vis_vectors = video_embeddings_BxD / video_embeddings_BxD.norm(
+            dim=-1, keepdim=True,
+        )
+        category_preds: dict[str, list[bool]] = {}
+        for class_name in ABNORMAL_CLASS_NAMES:
+            txt_vec = service.category_txt_vectors.get(class_name)
+            normal_vec = service.category_normal_vectors.get(class_name)
+            if txt_vec is None or normal_vec is None:
+                continue
+            sim_abn_max = (vis_vectors @ txt_vec).max(dim=1).values
+            sim_nrm_max = (vis_vectors @ normal_vec).max(dim=1).values
+            category_preds[class_name] = (
+                sim_abn_max > sim_nrm_max
+            ).detach().cpu().tolist()
+        predicts_per_stream = [
+            {cls: category_preds[cls][i] for cls in category_preds}
+            for i in range(len(stream_ids))
+        ]
+        return service.alarm_event_manager.update(
+            predicts_per_stream, stream_ids, user_params,
+        )
+
     # --- Prime the FTPEService temporal buffer so each measured tick (full
     # OR half) actually produces a video embedding.
     buffer_warmup = TEMPORAL_SIZE + service.window_size + 2
@@ -299,11 +335,24 @@ def benchmark(
         "three_quarters_cycle": [],
         "half_cycle": [],
         "inference": [],
+        "disk_read": [],
+        "cos_sim": [],
     }
     per_iter_temp: list[float | None] = []
     t_start = query_gpu_temp_c()
 
     in_mem = fresh_batches()  # "ndarray already in RAM" baseline for three_quarters
+
+    # Stash a (B, 1024) video_embeddings tensor for the cos_sim stage. The
+    # text-side block doesn't actually care about the values -- the matmul
+    # cost is independent of the input -- so we use one tick's video emb
+    # captured after warmup. ``half_cycle`` returns this same shape.
+    _half_warm = _postprocess_to_video_emb(
+        service._preprocess_stage(fresh_batches(), user_params), stream_ids,
+    )
+    if _half_warm is None:
+        raise RuntimeError("warmup didn't fill the frame_buffer; cannot prime cos_sim input")
+    fixed_video_embs = _half_warm.detach()
 
     for _ in range(measure_iters):
         # full_cycle: one production tick. disk read -> _detect (preprocess
@@ -344,6 +393,24 @@ def benchmark(
         _, dt = time_call(lambda: service._inference_stage(preprocessed_bt))
         samples["inference"].append(dt * 1000.0)
 
+        # disk_read: isolated cost of loading B ndarrays from disk
+        # (PIL.Image.open + decode + np.array). Equals full_cycle minus
+        # three_quarters_cycle in expectation.
+        _, dt = time_call(
+            lambda: [load_image_ndarray(image_path) for _ in range(batch_size)]
+        )
+        samples["disk_read"].append(dt * 1000.0)
+
+        # cos_sim: isolated text-side block (L2 norm + 4× per-class cos-sim
+        # vs text features + comparison + alarm event manager). Uses a
+        # pre-stacked (B, 1024) video_embeddings tensor so only the text-
+        # side work is timed. Equals full_cycle minus half_cycle in
+        # expectation.
+        _, dt = time_call(
+            lambda: _text_side(fixed_video_embs, stream_ids, user_params)
+        )
+        samples["cos_sim"].append(dt * 1000.0)
+
         per_iter_temp.append(query_gpu_temp_c())
 
     t_end = query_gpu_temp_c()
@@ -372,6 +439,8 @@ def benchmark(
         "three_quarters_cycle_ms": [round(v, 3) for v in samples["three_quarters_cycle"]],
         "half_cycle_ms":           [round(v, 3) for v in samples["half_cycle"]],
         "inference_ms":            [round(v, 3) for v in samples["inference"]],
+        "disk_read_ms":            [round(v, 3) for v in samples["disk_read"]],
+        "cos_sim_ms":              [round(v, 3) for v in samples["cos_sim"]],
         "gpu_temp_c":              [round(t, 1) if t is not None else None for t in per_iter_temp],
     }
 
