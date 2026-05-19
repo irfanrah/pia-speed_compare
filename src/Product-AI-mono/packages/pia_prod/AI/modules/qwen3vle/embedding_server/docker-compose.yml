@@ -1,0 +1,63 @@
+services:
+  qwen3vle-embedding-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Base image per GPU architecture:
+        #   Blackwell (e.g. B200):                vllm/vllm-openai:cu130-nightly
+        #   Hopper / Ampere (H100, A100):         vllm/vllm-openai:latest
+        #   Stable default for Qwen3VLE:          vllm/vllm-openai:v0.14.0
+        BASE_IMAGE: ${VLLM_IMAGE:-vllm/vllm-openai:v0.14.0}
+    image: qwen3vle-embedding-server:local
+    container_name: qwen3vle-embedding-server
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${GPU_COUNT:-1}
+              capabilities: [gpu]
+    ports:
+      - "${SERVER_PORT:-8210}:8210"
+    ipc: host
+    shm_size: 16g
+    environment:
+      # --- vLLM Engine ---
+      MODEL_PATH: /models/${MODEL_NAME:-Qwen3-VL-Embedding-2B-FP8}
+      DTYPE: ${DTYPE:-bfloat16}
+      GPU_MEMORY_UTILIZATION: ${GPU_MEMORY_UTILIZATION:-0.3}
+      VLLM_MAX_CONCURRENCY: ${VLLM_MAX_CONCURRENCY:-10}
+      MAX_MODEL_LEN: ${MAX_MODEL_LEN:-8192}
+      LIMIT_MM_PER_PROMPT_VIDEO: ${LIMIT_MM_PER_PROMPT_VIDEO:-1}
+      LIMIT_MM_PER_PROMPT_IMAGE: ${LIMIT_MM_PER_PROMPT_IMAGE:-1}
+      KV_CACHE_MEMORY_BYTES: ${KV_CACHE_MEMORY_BYTES:-}
+      MAX_NUM_SEQS: ${MAX_NUM_SEQS:-}
+      MAX_NUM_BATCHED_TOKENS: ${MAX_NUM_BATCHED_TOKENS:-}
+
+      # --- HuggingFace Auto-Download ---
+      HF_NAMESPACE: ${HF_NAMESPACE:-PIA-SPACE-LAB}
+      HF_MODEL_REPO_ID: ${HF_MODEL_REPO_ID:-${HF_NAMESPACE:-PIA-SPACE-LAB}/${MODEL_NAME:-Qwen3-VL-Embedding-2B-FP8}}
+      HF_TEXT_FEATURES_REPO_ID: ${HF_TEXT_FEATURES_REPO_ID:-}
+      HF_TEXT_FEATURES_FILE: ${HF_TEXT_FEATURES_FILE:-VLE_FP8_text_features.json}
+      HF_AUTH_TOKEN: ${HF_AUTH_TOKEN:-}
+
+      # --- Server ---
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8210
+
+      # --- Hardware Device Mapping ---
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-0}
+
+    volumes:
+      # Host directory mount for model checkpoint
+      - ${MODEL_DIR:?MODEL_DIR is required - set it to a host directory the server can read/write the model checkpoint to. See README.md "Model download" for examples.}:/models:rw
+    restart: unless-stopped
+    healthcheck:
+      # Accommodates vLLM cold-start
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8210/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s

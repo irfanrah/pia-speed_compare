@@ -1,0 +1,127 @@
+name: Create Branch and PR on Issue Assignment
+
+on:
+  issues:
+    types: [assigned]
+
+jobs:
+  create-branch-and-pr:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+      issues: write        # 이슈 코멘트 읽기/쓰기 권한
+      pull-requests: write # PR 코멘트 읽기/쓰기 권한 (PR인 경우 필요)
+
+    steps:
+      - name: Get assignee token
+        id: get_token
+        run: |
+          ASSIGNEE_UPPER=$(echo "${{ github.event.assignee.login }}" | tr '[:lower:]' '[:upper:]' | sed 's/-/_/g')
+          TOKEN_NAME="TOKEN_${ASSIGNEE_UPPER}"
+          echo "token_name=$TOKEN_NAME" >> $GITHUB_OUTPUT
+
+      - name: Checkout fork repository
+        uses: actions/checkout@v4.2.2
+        with:
+          repository: ${{ github.event.assignee.login }}/${{ github.event.repository.name }}
+          ref: dev
+          token: ${{ secrets[steps.get_token.outputs.token_name] }}
+
+      - name: Get issue comment
+        id: get_comment
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const comments = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+            const firstComment = comments.data[0]?.body || '';
+            const linearMatch = firstComment.match(/<a href="https:\/\/linear\.app\/[^"]+">([^\s<]+)/);
+            const linearContent = linearMatch ? linearMatch[1] : '';
+            return linearContent;
+
+      - name: Create branch name
+        id: branch_name
+        run: |
+          function sanitize_branch_name() {
+            local input="$1"
+
+            input="'$input'"
+            if [[ "$input" == "${{ steps.get_comment.outputs.result }}" ]]; then
+              input=$(echo "$input" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+              input=$(echo "$input" | cut -c1-100)
+            else
+              input=$(echo "$input" | awk '{
+                gsub(/ /, "-");
+                gsub(/[^가-힣a-zA-Z0-9-]/, "");
+                gsub(/-+/, "-");
+                gsub(/^-|-$/, "");
+                print tolower($0);
+              }' | cut -c1-100)
+            fi
+
+            echo "$input"
+          }
+
+          SANITIZED_COMMENT=$(sanitize_branch_name '${{ steps.get_comment.outputs.result }}')
+          SANITIZED_TITLE=$(sanitize_branch_name '${{ github.event.issue.title }}')
+
+          BRANCH_NAME="${SANITIZED_COMMENT}-${SANITIZED_TITLE}"
+
+          echo "branch_name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+
+      - name: Setup upstream and pull
+        run: |
+          git config --global user.name "${{ github.event.assignee.login }}"
+          git config --global user.email "${{ github.event.assignee.login }}@users.noreply.github.com"
+          git remote add upstream https://github.com/${{ github.repository }}.git
+          git pull upstream dev
+
+      - name: Create branch
+        run: |
+          git checkout -b ${{ steps.branch_name.outputs.branch_name }}
+          git commit --allow-empty -m "chore: initial commit for ${{ steps.branch_name.outputs.branch_name }}"
+          git push origin ${{ steps.branch_name.outputs.branch_name }}
+
+      - name: Add checkout command comment
+        uses: actions/github-script@v6
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: 'Successfully created the branch.\n\n```bash\ngit fetch origin\ngit checkout ${{ steps.branch_name.outputs.branch_name }}\n```'
+            });
+
+      - name: Create Pull Request
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const myOctokit = new github.constructor({
+              auth: process.env.FULL_PAT
+            });
+
+            const linearId = process.env.LINEAR_ISSUE_ID.replace(/^["']|["']$/g, '')
+            const githubTitle = process.env.GITHUB_ISSUE_TITLE.replace(/^["']|["']$/g, '')
+            const githubNumber = process.env.GITHUB_ISSUE_NUMBER.replace(/^["']|["']$/g, '')
+
+            await myOctokit.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `${linearId} ${githubTitle}`,
+              head: `${context.payload.assignee.login}:${process.env.BRANCH_NAME}`,
+              base: 'dev',
+              body: `## 작업 내역(필수)\n\n- 카테고리 명\n- 프로젝트 명 \n- 사용 모델\n- 기타\n\n## PR Type\n\n- [ ] 기능 추가  \n- [ ] 버그 수정  \n- [ ] 포멧팅  \n- [ ] 문서화  \n- [ ] 테스트  \n- [ ] 기타  \n\n## 노션 링크 (선택)\n\n\n## 연결된 이슈 링크\n\n#${githubNumber}`,
+              draft: true,
+              maintainer_can_modify: true
+            });
+        env:
+          FULL_PAT: ${{ secrets[steps.get_token.outputs.token_name] }}
+          BRANCH_NAME: ${{ steps.branch_name.outputs.branch_name }}
+          LINEAR_ISSUE_ID: ${{ steps.get_comment.outputs.result }}
+          GITHUB_ISSUE_TITLE: ${{ github.event.issue.title }}
+          GITHUB_ISSUE_NUMBER: ${{ github.event.issue.number }}

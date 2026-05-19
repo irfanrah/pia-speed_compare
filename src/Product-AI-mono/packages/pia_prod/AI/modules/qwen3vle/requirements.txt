@@ -1,0 +1,27 @@
+# qwen3vle -- Module-Specific Dependencies
+# Common deps are in ../requirements.txt.
+#
+# Model inference for this module runs in a separate vLLM Docker container
+# (see embedding_server/). The service is an HTTP client only — it does not
+# import transformers/accelerate/qwen-vl-utils. Local dependencies are
+# limited to the post-processing path:
+#   - torch / torchvision: text-feature cosine similarity on GPU + TF.resize
+#   - numba: pia.vision.preprocessing.color BGR↔RGB conversion
+#   - pillow: JPEG encoding before POSTing frames to the embedding server
+#   - httpx: synchronous HTTP client used inside the service's `_predict`
+
+# -- PyTorch -------------------------------------------------------------------
+# Provided by the Docker base image at the same version; listed here so that
+# local `pip install -r requirements.txt` outside Docker also pins correctly.
+torch==2.8.0
+torchvision==0.23.0
+
+# -- JIT-compiled image processing ---------------------------------------------
+# Traced from: pia.vision.preprocessing.color -> numba (njit, prange)
+numba==0.61.2
+
+# -- HTTP client + JPEG codec --------------------------------------------------
+# httpx: sync POSTs to embedding_server's /v1/embeddings/batch endpoint
+# pillow: in-process JPEG encode of resized RGB frames before transport
+httpx>=0.27
+pillow>=10

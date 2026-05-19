@@ -1,0 +1,24 @@
+name: PR Assignment
+
+on:
+  pull_request:
+    types: [opened]
+
+jobs:
+  add-reviewer-and-assign-self:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get PR author token
+        id: get_token
+        run: |
+          AUTHOR_UPPER=$(echo "${{ github.event.pull_request.user.login }}" | tr '[:lower:]' '[:upper:]' | sed 's/-/_/g')
+          TOKEN_NAME="TOKEN_${AUTHOR_UPPER}"
+          echo "token_name=$TOKEN_NAME" >> $GITHUB_OUTPUT
+
+      - name: Assign pull request to author
+        uses: gustavofreze/auto-assign@1.0.0
+        with:
+          assignees: ${{ github.event.pull_request.user.login }}
+          github_token: ${{ secrets[steps.get_token.outputs.token_name] }}
+          assignment_options: 'PULL_REQUEST'

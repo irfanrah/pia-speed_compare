@@ -1,0 +1,129 @@
+name: Fix Code from Review
+
+on:
+  repository_dispatch:
+    types: [review-fix-request]
+
+jobs:
+  fix-from-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Get repo owner token
+        id: get_token
+        run: |
+          OWNER_UPPER=$(echo "${{ github.repository_owner }}" | tr '[:lower:]' '[:upper:]' | sed 's/-/_/g')
+          TOKEN_NAME="TOKEN_${OWNER_UPPER}"
+          echo "token_name=$TOKEN_NAME" >> $GITHUB_OUTPUT
+
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.client_payload.pull_request.head_ref }}
+          fetch-depth: 0
+          token: ${{ secrets[steps.get_token.outputs.token_name] }}
+
+      - name: Configure git for Claude commits
+        run: |
+          git config user.name "claude-bot"
+          git config user.email "claude-bot@users.noreply.github.com"
+
+      - name: Build fix prompt
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const payload = context.payload.client_payload;
+
+            let prompt = '당신은 PR 리뷰 피드백을 반영하는 개발자입니다.\n\n';
+            prompt += `## 리뷰 판정: ${payload.review_event}\n\n`;
+            prompt += `## 리뷰 내용:\n${payload.review_body}\n\n`;
+            prompt += '## 규칙:\n';
+            prompt += '1. CLAUDE.md의 상황별 참조 문서 테이블에서 수정 가이드를 확인하세요.\n';
+            prompt += '2. 리뷰 내용을 분석하여 코드를 수정하세요.\n';
+            prompt += '3. 수정 후 적절한 커밋 메시지로 커밋하세요.\n';
+            prompt += `4. push 전에 반드시 \`git fetch origin && git merge origin/${payload.pull_request.base_ref}\`로 동기화한 뒤 push하세요.\n`;
+            prompt += '5. 작업 결과를 요약해서 출력하세요. (수정한 내용)\n';
+
+            fs.writeFileSync('/tmp/fix-prompt.txt', prompt);
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Cache Claude Code CLI
+        id: cache-claude
+        uses: actions/cache@v4
+        with:
+          path: /usr/local/lib/node_modules/@anthropic-ai/claude-code
+          key: claude-code-${{ runner.os }}
+
+      - name: Install Claude Code CLI
+        if: steps.cache-claude.outputs.cache-hit != 'true'
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Link Claude Code CLI
+        if: steps.cache-claude.outputs.cache-hit == 'true'
+        run: npm link -g @anthropic-ai/claude-code
+
+      - name: Run Claude Code
+        id: claude
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_TOKEN }}
+        run: |
+          set +e
+          cat /tmp/fix-prompt.txt | claude -p - \
+            --model opus \
+            --allowedTools "Edit,Write,Read,Glob,Grep,Bash(git commit:*),Bash(git push:*),Bash(git add:*),Bash(git diff:*),Bash(git status:*),Bash(git fetch:*),Bash(git merge:*)" \
+            > /tmp/claude-result.txt 2>/tmp/claude-error.txt
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+          set -e
+
+      # NOTE: 이 토큰은 upstream 레포 PR에 댓글 권한이 필요합니다
+      - name: Reply on upstream PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets[steps.get_token.outputs.token_name] }}
+          script: |
+            const fs = require('fs');
+            const raw = fs.readFileSync('/tmp/claude-result.txt', 'utf8').trim();
+            const payload = context.payload.client_payload;
+            const upstreamOwner = payload.pull_request.upstream_owner;
+            const upstreamRepo = payload.pull_request.upstream_repo;
+            const prNumber = payload.pull_request.number;
+
+            const exitCode = '${{ steps.claude.outputs.exit_code }}';
+            const isError = exitCode !== '0' || !raw;
+            const body = isError
+              ? `> 리뷰 판정: ${payload.review_event}\n\nClaude 실행 중 문제가 발생했습니다. 수동 확인이 필요합니다.\n\n<details><summary>로그</summary>\n\n\`\`\`\n${raw || '(출력 없음)'}\n\`\`\`\n</details>`
+              : raw;
+
+            // 인라인 코멘트에 대댓글 달기 (에러 시 스킵)
+            if (!isError) {
+              const reviewComments = payload.review_comments || [];
+              for (const comment of reviewComments) {
+                try {
+                  await github.rest.pulls.createReplyForReviewComment({
+                    owner: upstreamOwner,
+                    repo: upstreamRepo,
+                    pull_number: prNumber,
+                    comment_id: comment.id,
+                    body: `✅ 수정 반영했습니다.`
+                  });
+                } catch (e) {
+                  console.log(`Failed to reply to comment ${comment.id}: ${e.message}`);
+                }
+              }
+            }
+
+            // 전체 수정 요약은 일반 댓글로
+            await github.rest.issues.createComment({
+              owner: upstreamOwner,
+              repo: upstreamRepo,
+              issue_number: prNumber,
+              body: `🤖 **Claude Fix Response**\n\n${body}`
+            });
