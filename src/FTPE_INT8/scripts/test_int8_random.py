@@ -229,12 +229,12 @@ def main() -> int:
                    help="Pass threshold for cosine similarity vs PT BF16.")
     p.add_argument("--max_mse", type=float, default=1e-3,
                    help="Pass threshold for MSE vs PT BF16.")
-    p.add_argument("--out-dir", type=str, default=None,
-                   help="If set, write a per-engine cos/MSE summary JSON here. "
-                        "Filename: cos_mse_<gpu>_b<B>_t<T>_<timestamp><_tag>.json.")
-    p.add_argument("--tag", type=str, default="",
-                   help="Optional suffix appended to the output JSON filename "
-                        "(matches scripts/speed_calculate_*.py's --tag convention).")
+    p.add_argument("--append-to", type=str, default=None,
+                   help="If set, append a ``cos_mse`` section to this existing "
+                        "speed-bench JSON (in place). Avoids re-emitting gpu / "
+                        "config / timestamp fields that already live in the "
+                        "speed JSON. Wrappers wire this up by grepping the "
+                        "speed bench's `wrote: <path>` log line.")
     args = p.parse_args()
 
     if not torch.cuda.is_available():
@@ -354,9 +354,8 @@ def main() -> int:
 
     print(f"\n[test] thresholds: cos >= {args.min_cos}   mse <= {args.max_mse:.0e}")
 
-    # ── Optional JSON dump ─────────────────────────────────────────────
-    if args.out_dir:
-        gpu = _gpu_info()
+    # ── Append cos_mse section to the speed-bench JSON ─────────────────
+    if args.append_to:
         engines_summary: Dict[str, dict] = {}
         for name in runners:
             cos_samples = acc[name]["cos"]
@@ -372,38 +371,28 @@ def main() -> int:
                 ],
                 "passed": (cos_mean >= args.min_cos) and (mse_mean <= args.max_mse),
             }
-        initial_time = datetime.now()
-        payload = {
+        cos_section = {
             "test_kind": "random_image_cos_mse",
-            "initial_time": initial_time.isoformat(timespec="seconds"),
-            "config_name": args.config_name,
-            "ft_ckpt": args.ft_ckpt,
             "engine_dir": args.engine_dir,
-            "batch_videos": args.batch_videos,
-            "frames_per_video": args.frames_per_video,
-            "bt": bt,
+            "ft_ckpt": args.ft_ckpt,
             "iters": args.iters,
             "seed": args.seed,
             "min_cos": args.min_cos,
             "max_mse": args.max_mse,
-            "gpu": gpu,
-            "gpu_type": gpu["name"],
-            "torch_version": torch.__version__,
-            "cuda_runtime": torch.version.cuda,
             "engines": engines_summary,
             "overall_passed": not any_fail,
         }
-        os.makedirs(args.out_dir, exist_ok=True)
-        safe_gpu = gpu["name"].replace(" ", "_").replace("/", "_")
-        ts = initial_time.strftime("%Y%m%d_%H%M%S")
-        suffix = f"_{args.tag}" if args.tag else ""
-        out_path = os.path.join(
-            args.out_dir,
-            f"cos_mse_{safe_gpu}_b{args.batch_videos}_t{args.frames_per_video}_{ts}{suffix}.json",
-        )
-        with open(out_path, "w") as f:
-            json.dump(payload, f, indent=2)
-        print(f"[test] wrote: {out_path}")
+        try:
+            with open(args.append_to, "r") as f:
+                speed_json = json.load(f)
+            speed_json["cos_mse"] = cos_section
+            with open(args.append_to, "w") as f:
+                json.dump(speed_json, f, indent=2)
+            print(f"[test] appended cos_mse section to: {args.append_to}")
+        except FileNotFoundError:
+            print(f"[test] WARN: --append-to target not found: {args.append_to}", file=sys.stderr)
+        except json.JSONDecodeError as e:
+            print(f"[test] WARN: --append-to target is not valid JSON ({e}); skipping append", file=sys.stderr)
 
     if any_fail:
         print("[test] FAIL — one or more engines did not meet the threshold")

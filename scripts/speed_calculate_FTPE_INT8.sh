@@ -63,6 +63,9 @@ if [ "${1:-}" = "--" ]; then
     EXTRA=("$@")
 fi
 
+# Capture the speed-bench JSON path so the cos pass can append its section
+# to it. Same pattern as scripts/speed_calculate_PE_INT8.sh.
+SPEED_LOG="$(mktemp -t ftpe_int8_speed.XXXXXX.log)"
 "$PYTHON" src/FTPE_INT8/speed_calculate_FTPE_INT8.py \
     --engine "$FTPE_INT8_ENGINE" \
     --ftpe-engine "$FTPE_BF16_ENGINE" \
@@ -71,7 +74,9 @@ fi
     --frames "$FRAMES" \
     --warmup "$WARMUP" \
     --iters "$ITERS" \
-    "${EXTRA[@]}"
+    "${EXTRA[@]}" 2>&1 | tee "$SPEED_LOG"
+SPEED_JSON="$(awk '/^wrote: /{print $2; exit}' "$SPEED_LOG")"
+rm -f "$SPEED_LOG"
 
 # ── Random-image cos/MSE check vs PT BF16 ───────────────────────────────
 SKIP_COS=${SKIP_COS:-0}
@@ -117,8 +122,10 @@ echo "[FT_PE_INT8] B=$BATCH  T=$FRAMES  iters=$COS_ITERS  min_cos=$COS_MIN_COS  
 
 # `test_int8_random.py` walks every .engine in --engine-dir; the per-engine
 # profile check skips engines whose [min,max] doesn't include BT.
-COS_OUT_DIR=${COS_OUT_DIR:-results}
-COS_TAG=${COS_TAG:-ftpe_int8}
+APPEND_TO_ARGS=()
+if [ -n "${SPEED_JSON:-}" ] && [ -f "$SPEED_JSON" ]; then
+    APPEND_TO_ARGS=(--append-to "$SPEED_JSON")
+fi
 "$PYTHON" src/FTPE_INT8/scripts/test_int8_random.py \
     --engine-dir "$FTPE_INT8_ENGINE_DIR" \
     --ft_ckpt "$FTPE_QAT_PT" \
@@ -127,7 +134,7 @@ COS_TAG=${COS_TAG:-ftpe_int8}
     --iters "$COS_ITERS" \
     --min_cos "$COS_MIN_COS" \
     --max_mse "$COS_MAX_MSE" \
-    --out-dir "$COS_OUT_DIR" --tag "$COS_TAG" || {
+    "${APPEND_TO_ARGS[@]}" || {
         echo "[FT_PE_INT8] cos/MSE check exited non-zero (engine(s) below threshold)" >&2
         exit 0  # don't fail the wrapper — the speed numbers above are still valid
     }

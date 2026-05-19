@@ -73,6 +73,10 @@ if [ "${1:-}" = "--" ]; then
     EXTRA=("$@")
 fi
 
+# Capture the speed-bench JSON path so the cos pass can append its section
+# to it. Use `script` (PTY-preserving) so we don't lose interactive flush
+# behaviour, falling back to plain `tee` for portability.
+SPEED_LOG="$(mktemp -t pe_int8_speed.XXXXXX.log)"
 "$PYTHON" src/speed_calculate_PE.py \
     --engine "$PE_INT8_ENGINE" \
     --text-features "$PE_TEXT_FEATURES" \
@@ -80,7 +84,9 @@ fi
     --warmup "$WARMUP" \
     --iters "$ITERS" \
     --tag int8 \
-    "${EXTRA[@]}"
+    "${EXTRA[@]}" 2>&1 | tee "$SPEED_LOG"
+SPEED_JSON="$(awk '/^wrote: /{print $2; exit}' "$SPEED_LOG")"
+rm -f "$SPEED_LOG"
 
 # ── Random-image cos/MSE check vs PT BF16 ───────────────────────────────
 SKIP_COS=${SKIP_COS:-0}
@@ -126,8 +132,12 @@ echo "[PE_INT8] B=$BATCH  T=1  iters=$COS_ITERS  min_cos=$COS_MIN_COS  max_mse=$
 
 # `test_int8_random.py` walks every .engine in --engine-dir; the per-engine
 # profile check inside it skips engines whose [min,max] doesn't include BT.
-COS_OUT_DIR=${COS_OUT_DIR:-results}
-COS_TAG=${COS_TAG:-pe_int8}
+# When SPEED_JSON was captured above, the cos pass appends a ``cos_mse``
+# section to it in place — single JSON per run instead of a sidecar file.
+APPEND_TO_ARGS=()
+if [ -n "${SPEED_JSON:-}" ] && [ -f "$SPEED_JSON" ]; then
+    APPEND_TO_ARGS=(--append-to "$SPEED_JSON")
+fi
 "$PYTHON" src/FTPE_INT8/scripts/test_int8_random.py \
     --engine-dir "$PE_INT8_ENGINE_DIR" \
     --ft_ckpt "$PE_QAT_PT" \
@@ -136,7 +146,7 @@ COS_TAG=${COS_TAG:-pe_int8}
     --iters "$COS_ITERS" \
     --min_cos "$COS_MIN_COS" \
     --max_mse "$COS_MAX_MSE" \
-    --out-dir "$COS_OUT_DIR" --tag "$COS_TAG" || {
+    "${APPEND_TO_ARGS[@]}" || {
         echo "[PE_INT8] cos/MSE check exited non-zero (engine(s) below threshold)" >&2
         exit 0  # don't fail the wrapper — the speed numbers above are still valid
     }
