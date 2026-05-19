@@ -58,6 +58,25 @@ export HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
 export PYTHONUNBUFFERED=1
 PY="${PYTHONBIN:-$(command -v python3)}"
 
+# Make CUDA-bound libs from the pip-installed nvidia-* wheels visible to ORT.
+# onnxruntime-gpu doesn't ship its own cuDNN; without this on LD_LIBRARY_PATH
+# the CUDAExecutionProvider fails to load (libcudnn.so.9 missing) and PTQ
+# silently falls back to CPU -- OK at BT=12, OOMs the BFC arena at BT>=48.
+_NV_LIBS="$("$PY" -c '
+import os, importlib
+libs=[]
+for mod in ["nvidia.cudnn","nvidia.cublas","nvidia.cuda_runtime","nvidia.cufft","nvidia.curand","nvidia.cusolver","nvidia.cusparse","nvidia.nccl","nvidia.nvjitlink","nvidia.cuda_cupti","nvidia.cuda_nvrtc"]:
+    try:
+        m = importlib.import_module(mod)
+        p = os.path.dirname(m.__file__)+"/lib"
+        if os.path.isdir(p): libs.append(p)
+    except Exception: pass
+print(":".join(libs))
+' 2>/dev/null || true)"
+if [[ -n "$_NV_LIBS" ]]; then
+    export LD_LIBRARY_PATH="$_NV_LIBS${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
 BT=$((BATCH * T_FRAMES))
 TAG="b${BATCH}t${T_FRAMES}"
 mkdir -p "$OUT_DIR"/{onnx,engines,calib,logs,results}

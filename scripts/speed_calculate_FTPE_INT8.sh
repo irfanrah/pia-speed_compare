@@ -17,11 +17,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
-FTPE_INT8_ENGINE=${FTPE_INT8_ENGINE:-assets/QAT/int8_b4t3_crl.engine}
+FTPE_INT8_ENGINE=${FTPE_INT8_ENGINE:-assets/QAT/int8_dyn_crl_t3.engine}
 FTPE_BF16_ENGINE=${FTPE_BF16_ENGINE:-assets/model/FT_PE-Core-L14-336_260318_vision_no_mean_pooling.engine}
 FTPE_TEXT_FEATURES=${FTPE_TEXT_FEATURES:-assets/model/FT_text_features.json}
 
-BATCH=${BATCH:-4}
+BATCH=${BATCH:-16}
 FRAMES=${FRAMES:-3}      # T=3 is the canonical FT-T3 INT8 deploy
 WARMUP=${WARMUP:-5}
 ITERS=${ITERS:-25}

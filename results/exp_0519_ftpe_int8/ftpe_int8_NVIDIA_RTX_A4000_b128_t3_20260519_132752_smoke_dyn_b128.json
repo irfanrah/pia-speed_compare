@@ -1,0 +1,114 @@
+{
+  "model": "FT_PE-Core-L14-336_INT8_CRL",
+  "code_path": "FTPEService._detect (split stages, INT8 engine swapped in)",
+  "initial_time": "2026-05-19T13:27:52",
+  "gpu_type": "NVIDIA RTX A4000",
+  "gpu": {
+    "name": "NVIDIA RTX A4000",
+    "device_index": 0,
+    "compute_capability": "8.6",
+    "total_memory_mib": 16108,
+    "driver_version": "535.183.01"
+  },
+  "batch_size": 128,
+  "frames": 3,
+  "engine_path": "assets/QAT/int8_dyn_crl_t3.engine",
+  "bootstrap_engine_path": "assets/model/FT_PE-Core-L14-336_260318_vision_no_mean_pooling.engine",
+  "text_features_path": "assets/model/FT_text_features.json",
+  "image_path": "/home/kurnianto/code/pia-speed_compare/assets/images/kkpolice_1.jpg",
+  "input_size": [
+    3,
+    3,
+    336,
+    336
+  ],
+  "warmup_iters": 1,
+  "measure_iters": 2,
+  "torch_version": "2.5.1+cu124",
+  "cuda_runtime": "12.4",
+  "stages": {
+    "full_cycle": {
+      "mean_ms": 18630.176,
+      "median_ms": 18630.176,
+      "p95_ms": 18728.562,
+      "p99_ms": 18728.562,
+      "min_ms": 18531.79,
+      "max_ms": 18728.562,
+      "std_ms": 98.386
+    },
+    "three_quarters_cycle": {
+      "mean_ms": 16833.787,
+      "median_ms": 16833.787,
+      "p95_ms": 16876.014,
+      "p99_ms": 16876.014,
+      "min_ms": 16791.561,
+      "max_ms": 16876.014,
+      "std_ms": 42.226
+    },
+    "half_cycle": {
+      "mean_ms": 18588.769,
+      "median_ms": 18588.769,
+      "p95_ms": 18644.417,
+      "p99_ms": 18644.417,
+      "min_ms": 18533.121,
+      "max_ms": 18644.417,
+      "std_ms": 55.648
+    },
+    "inference": {
+      "mean_ms": 15862.428,
+      "median_ms": 15862.428,
+      "p95_ms": 16030.758,
+      "p99_ms": 16030.758,
+      "min_ms": 15694.099,
+      "max_ms": 16030.758,
+      "std_ms": 168.33
+    }
+  },
+  "throughput": {
+    "full_cycle_imgs_per_s": 20.61,
+    "three_quarters_cycle_imgs_per_s": 22.81,
+    "half_cycle_imgs_per_s": 20.66,
+    "inference_imgs_per_s": 24.21,
+    "full_cycle_streams_per_s": 6.87,
+    "three_quarters_cycle_streams_per_s": 7.6,
+    "half_cycle_streams_per_s": 6.89
+  },
+  "iterations": {
+    "iter": [
+      0,
+      1
+    ],
+    "full_cycle_ms": [
+      18728.562,
+      18531.79
+    ],
+    "three_quarters_cycle_ms": [
+      16876.014,
+      16791.561
+    ],
+    "half_cycle_ms": [
+      18533.121,
+      18644.417
+    ],
+    "inference_ms": [
+      15694.099,
+      16030.758
+    ],
+    "gpu_temp_c": [
+      101.0,
+      101.0
+    ]
+  },
+  "gpu_temperature_c": {
+    "start": 101.0,
+    "end": 101.0,
+    "min": 101.0,
+    "max": 101.0,
+    "mean": 101.0
+  },
+  "engine_profile_bt": {
+    "min": 12,
+    "opt": 48,
+    "max": 384
+  }
+}
