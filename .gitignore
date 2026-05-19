@@ -13,6 +13,7 @@ env/
 assets/model/*.engine
 assets/model/*.onnx
 assets/model/*.json
+assets/model/*.png
 
 assets/QAT
 
