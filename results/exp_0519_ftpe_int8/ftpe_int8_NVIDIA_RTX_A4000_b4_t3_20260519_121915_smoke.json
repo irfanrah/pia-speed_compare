@@ -1,0 +1,132 @@
+{
+  "model": "FT_PE-Core-L14-336_INT8_CRL",
+  "code_path": "FTPEService._detect (split stages, INT8 engine swapped in)",
+  "initial_time": "2026-05-19T12:19:15",
+  "gpu_type": "NVIDIA RTX A4000",
+  "gpu": {
+    "name": "NVIDIA RTX A4000",
+    "device_index": 0,
+    "compute_capability": "8.6",
+    "total_memory_mib": 16108,
+    "driver_version": "535.183.01"
+  },
+  "batch_size": 4,
+  "frames": 3,
+  "engine_path": "assets/QAT/int8_b4t3_crl.engine",
+  "bootstrap_engine_path": "assets/model/FT_PE-Core-L14-336_260318_vision_no_mean_pooling.engine",
+  "text_features_path": "assets/model/FT_text_features.json",
+  "image_path": "/home/kurnianto/code/pia-speed_compare/assets/images/kkpolice_1.jpg",
+  "input_size": [
+    3,
+    3,
+    336,
+    336
+  ],
+  "warmup_iters": 2,
+  "measure_iters": 5,
+  "torch_version": "2.5.1+cu124",
+  "cuda_runtime": "12.4",
+  "stages": {
+    "full_cycle": {
+      "mean_ms": 184.919,
+      "median_ms": 183.849,
+      "p95_ms": 187.09,
+      "p99_ms": 187.09,
+      "min_ms": 183.03,
+      "max_ms": 187.09,
+      "std_ms": 1.79
+    },
+    "three_quarters_cycle": {
+      "mean_ms": 108.415,
+      "median_ms": 107.596,
+      "p95_ms": 112.856,
+      "p99_ms": 112.856,
+      "min_ms": 106.356,
+      "max_ms": 112.856,
+      "std_ms": 2.276
+    },
+    "half_cycle": {
+      "mean_ms": 165.186,
+      "median_ms": 163.429,
+      "p95_ms": 170.288,
+      "p99_ms": 170.288,
+      "min_ms": 162.627,
+      "max_ms": 170.288,
+      "std_ms": 2.984
+    },
+    "inference": {
+      "mean_ms": 84.278,
+      "median_ms": 79.369,
+      "p95_ms": 95.426,
+      "p99_ms": 95.426,
+      "min_ms": 78.373,
+      "max_ms": 95.426,
+      "std_ms": 6.973
+    }
+  },
+  "throughput": {
+    "full_cycle_imgs_per_s": 64.89,
+    "three_quarters_cycle_imgs_per_s": 110.69,
+    "half_cycle_imgs_per_s": 72.65,
+    "inference_imgs_per_s": 142.39,
+    "full_cycle_streams_per_s": 21.63,
+    "three_quarters_cycle_streams_per_s": 36.9,
+    "half_cycle_streams_per_s": 24.22
+  },
+  "iterations": {
+    "iter": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ],
+    "full_cycle_ms": [
+      183.849,
+      187.09,
+      187.084,
+      183.542,
+      183.03
+    ],
+    "three_quarters_cycle_ms": [
+      107.778,
+      106.356,
+      112.856,
+      107.486,
+      107.596
+    ],
+    "half_cycle_ms": [
+      162.725,
+      162.627,
+      163.429,
+      166.862,
+      170.288
+    ],
+    "inference_ms": [
+      78.642,
+      78.373,
+      79.369,
+      89.581,
+      95.426
+    ],
+    "gpu_temp_c": [
+      91.0,
+      91.0,
+      92.0,
+      92.0,
+      93.0
+    ]
+  },
+  "gpu_temperature_c": {
+    "start": 91.0,
+    "end": 92.0,
+    "min": 91.0,
+    "max": 93.0,
+    "mean": 91.8
+  },
+  "engine_profile_bt": {
+    "min": 12,
+    "opt": 12,
+    "max": 12
+  }
+}

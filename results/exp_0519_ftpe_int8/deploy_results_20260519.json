@@ -1,0 +1,599 @@
+{
+  "config_name": "PE-Core-L14-336",
+  "ft_ckpt": "/home/kurnianto/code/pia-speed_compare/assets/QAT/qat_deploy_fp32.pt",
+  "frames_per_video": 3,
+  "iters": 30,
+  "warmup": 5,
+  "thresholds": {
+    "min_cos_video": 0.999,
+    "max_mse_video": 1e-05,
+    "target_speedup_int8_vs_trt_bf16": 1.5
+  },
+  "eval_videos": [
+    {
+      "split": "test",
+      "cls": "falldown",
+      "name": "abnormal_falldown_esc10_17-18_downstation_bottom_up_falldown_2_54_174.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "falldown",
+      "name": "2511_falldown_langmuang_1716_1816.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "falldown",
+      "name": "101319_생활방범-능동-116-비상벨_20241016230242_20241016230255_57_177.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "falldown",
+      "name": "2511_falldown_langmuang_1290_1390.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "falldown",
+      "name": "2511_falldown_langmuang_123_223.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "falldown",
+      "name": "falldown_total_set_C050303_003_1029_1149.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "falldown",
+      "name": "2511_falldown_langmuang_937_1037.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "falldown",
+      "name": "falldown_total_set_C054203_002_1029_1149.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "falldown",
+      "name": "gaepo1_v2_abnormal_woman_falldown_1_1008_1128.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "falldown",
+      "name": "falldown_total_set_C055203_006_1024_1144.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "falldown",
+      "name": "2511_falldown_langmuang_2156_2256.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "falldown",
+      "name": "falldown_total_set_C050303_003_849_969.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "falldown",
+      "name": "falldown_total_set_C054203_002_849_969.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "falldown",
+      "name": "falldown_total_set_C056103_006_873_993.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "falldown",
+      "name": "falldown_total_set_C056203_004_826_946.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "falldown",
+      "name": "falldown_total_set_C056103_006_1053_1173.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "falldown",
+      "name": "falldown_total_set_C055203_006_844_964.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "falldown",
+      "name": "falldown_total_set_C056203_004_1006_1126.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "falldown",
+      "name": "2511_falldown_langmuang_470_570.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "falldown",
+      "name": "POC_라벨필요_1st_poc_쓰러짐_1758779369078-1758779379805_97d0608d-69bb-406c-b270-26948e4e730a_0_120.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "fire",
+      "name": "event_실내_군중falldown-fire_007_9343_9463.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "fire",
+      "name": "event_실내_군중falldown-fire_007_5641_5761.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "fire",
+      "name": "0320_event_data_video_raw_폐기물보관장_화재_20260320_144704_92_152.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "fire",
+      "name": "0320_event_data_video_raw_폐촉매보관장_연기_20260320_153928_91_151.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "fire",
+      "name": "event_실내_군중falldown-fire_007_11284_11404.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "fire",
+      "name": "abnormal_case_camera1_fire_28_121.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "fire",
+      "name": "abnormal_case_camera9_fire_24_120.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "fire",
+      "name": "abnormal_fire_소형화재10_180_300.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "fire",
+      "name": "event_실내_군중falldown-fire_007_7827_7947.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "fire",
+      "name": "event_0821실내_6_플페fire_falldown_0_120.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "fire",
+      "name": "event_실내_군중falldown-fire_007_6902_7022.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "fire",
+      "name": "event_0821실내_6_플페fire_falldown_180_300.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "fire",
+      "name": "abnormal_fire_소형화재10_0_120.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "fire",
+      "name": "event_실내_군중falldown-fire_007_8007_8127.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "fire",
+      "name": "0320_event_data_video_raw_폐촉매보관장_연기_20260320_153928_1_61.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "fire",
+      "name": "event_실내_군중falldown-fire_007_6722_6842.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "fire",
+      "name": "0320_event_data_video_raw_폐기물보관장_화재_20260320_144704_2_62.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "fire",
+      "name": "event_실내_군중falldown-fire_007_5461_5581.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "fire",
+      "name": "event_실내_군중falldown-fire_007_9163_9283.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "fire",
+      "name": "event_실내_군중falldown-fire_007_11104_11224.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "normal",
+      "name": "사고영상_총모음_정상상황_청라언덕_청라언덕_ES_8_7_환승_하부_20250711-085600-085620_0_117.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "normal",
+      "name": "falldown_total_set_C058203_012_0_120.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "normal",
+      "name": "0406_event_data_video_raw_20260406_151340_헬멧_폐기물보관장_0_60.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "normal",
+      "name": "samsung_abnormal_falldown_89_0_120.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "normal",
+      "name": "0406_event_data_video_raw_20260406_160157_헬멧_폐촉매보관장_0_60.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "normal",
+      "name": "POC_라벨필요_1st_poc_쓰러짐_1758779493571-1758779495583_01e05a3e-1c5b-48a5-b185-271535a5b56a_0_120.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "normal",
+      "name": "0323_event_data_video_raw_ODC폐기물보관장_연기_20260323_150456_0_120.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "normal",
+      "name": "0406_event_data_video_raw_20260406_152935_헬멧_폐기물보관장_0_60.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "normal",
+      "name": "violence_total_set_C056104_011_0_120.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "normal",
+      "name": "violence_total_set_C056104_011_1687_1800.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "normal",
+      "name": "record_20251222_144141_5966_6086.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "normal",
+      "name": "smoke_ktt_6th_d1_walljump_76860_77184_0_60.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "normal",
+      "name": "normal_ec_10_15-16_upstation_bottom_up_walking_1_0_120.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "normal",
+      "name": "record_20251222_144141_0_120.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "normal",
+      "name": "normal_PP팀_재인코딩_출하장_2번_CLIP-20230104T150305-20230104T150421_CH01_0_120.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "normal",
+      "name": "samsung_abnormal_falldown_166_f_0_120.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "normal",
+      "name": "0320_event_data_video_raw_ODC폐기물보관장_연기_20260320_143824_0_120.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "normal",
+      "name": "record_20251222_144141_5389_5509.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "normal",
+      "name": "abnormal_현장_테스트_11._폐기물연기_0_117.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "normal",
+      "name": "사고영상_총모음_정상상황_청라언덕_청라언덕_ES_8_7_환승_하부_20250715-083000-083020_0_116.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "smoke",
+      "name": "abnormal_아크용접_가스용단_고속절단_445_545.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "smoke",
+      "name": "POC_라벨필요_1st_poc_1층_3번_카메라_4k_smoke_588_708.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "smoke",
+      "name": "POC_라벨필요_1st_poc_1층_3번_카메라_4k_smoke_408_528.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "smoke",
+      "name": "reenactment_10-4-14-250-c4-smoke_falldown_violence_7754_7854.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "smoke",
+      "name": "POC_라벨필요_1st_poc_연기_1758779171941-1758779184798_8c1dc5cf-5bbe-40b7-8d01-5f5c7ed9be23_0_120.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "smoke",
+      "name": "abnormal_case_camera9_smoke_12_108.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "smoke",
+      "name": "abnormal_아크용접_가스용단_고속절단_853_953.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "smoke",
+      "name": "reenactment_10-4-14-250-c4-smoke_falldown_violence_7320_7420.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "smoke",
+      "name": "abnormal_case_camera7_fire_39_121.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "smoke",
+      "name": "POC_라벨필요_1st_poc_연기_1758779312188-1758779316770_2919913d-753c-463c-8ec6-4c72fc34a7ab_0_100.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "smoke",
+      "name": "0320_event_data_video_raw_ODC폐기물보관장_연기_20260320_135205_1_121.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "smoke",
+      "name": "POC_라벨필요_1st_poc_연기_1758779171941-1758779184798_8c1dc5cf-5bbe-40b7-8d01-5f5c7ed9be23_180_300.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "smoke",
+      "name": "0320_event_data_video_raw_ODC폐기물보관장_연기_20260320_141548_1_120.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "smoke",
+      "name": "0320_event_data_video_raw_ODC폐기물보관장_연기_20260320_135205_181_301.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "smoke",
+      "name": "POC_라벨필요_1st_poc_1층_3번_카메라_4k_smoke_1062_1182.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "smoke",
+      "name": "POC_라벨필요_1st_poc_연기_1758779428438-1758779438646_5f62a104-9287-463b-88c1-260eeefde4e8_0_101.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "smoke",
+      "name": "POC_라벨필요_1st_poc_1층_3번_카메라_4k_smoke_1242_1362.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "smoke",
+      "name": "abnormal_아크용접_가스용단_고속절단_123_223.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "smoke",
+      "name": "POC_라벨필요_1st_poc_연기_1758779428438-1758779438646_5f62a104-9287-463b-88c1-260eeefde4e8_151_252.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "smoke",
+      "name": "abnormal_아크용접_가스용단_고속절단_703_803.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "violence",
+      "name": "violence_total_set_C055204_001_867_987.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "violence",
+      "name": "violence_total_set_C056104_007_873_993.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "violence",
+      "name": "violence_total_set_C058204_002_729_849.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "violence",
+      "name": "violence_total_set_C056104_011_834_954.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "violence",
+      "name": "violence_total_set_C055104_009_919_1039.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "violence",
+      "name": "violence_total_set_C054304_002_733_853.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "violence",
+      "name": "violence_total_set_C056204_004_750_870.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "violence",
+      "name": "violence_total_set_C056204_004_930_1050.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "violence",
+      "name": "106451_생활방범-화양-645-02_20241012040535_20241012040615_499_619.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "violence",
+      "name": "violence_total_set_C054304_002_913_1033.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "violence",
+      "name": "violence_total_set_C056104_011_654_774.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "violence",
+      "name": "samsung_abnormal_violence_17_0_120.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "violence",
+      "name": "violence_total_set_C050304_007_936_1056.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "violence",
+      "name": "violence_total_set_C056304_010_748_868.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "violence",
+      "name": "violence_total_set_C056304_010_928_1048.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "violence",
+      "name": "violence_total_set_C056104_007_693_813.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "violence",
+      "name": "violence_total_set_C050304_007_1116_1236.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "violence",
+      "name": "violence_total_set_C058204_002_909_1029.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "violence",
+      "name": "violence_total_set_C055204_001_687_807.mp4"
+    },
+    {
+      "split": "test",
+      "cls": "violence",
+      "name": "violence_total_set_C055104_009_739_859.mp4"
+    }
+  ],
+  "batches": {
+    "4": {
+      "engine_BT": 12,
+      "T": 3,
+      "video_keys": [
+        "test/falldown/abnormal_falldown_esc10_17-18_downstation_bottom_up_falldown_2_54_174.mp4",
+        "test/falldown/2511_falldown_langmuang_1716_1816.mp4",
+        "test/falldown/101319_생활방범-능동-116-비상벨_20241016230242_20241016230255_57_177.mp4",
+        "test/falldown/2511_falldown_langmuang_1290_1390.mp4"
+      ],
+      "engines": {
+        "pt_bf16": {
+          "precision": "bf16",
+          "kind": "pytorch_ft",
+          "median_ms": 254.6360321044922,
+          "videos_per_s": 15.708695925479093,
+          "frames_per_s": 47.12608777643728,
+          "size_MiB": null,
+          "cos_frame_mean": 1.0,
+          "mse_frame_mean": 0.0,
+          "cos_video_mean": 1.0,
+          "mse_video_mean": 0.0,
+          "speedup_vs_trt_bf16": 2.3198600992208274,
+          "speedup_vs_pt_bf16": 1.0
+        },
+        "bf16_b4t3.engine": {
+          "precision": "bf16",
+          "median_ms": 590.719970703125,
+          "videos_per_s": 6.771397952296857,
+          "frames_per_s": 20.314193856890572,
+          "size_MiB": 613.3171043395996,
+          "cos_frame_mean": 0.9999178647994995,
+          "cos_frame_min": 0.9997583627700806,
+          "mse_frame_mean": 1.622387202360187e-07,
+          "mse_frame_max": 4.7418808435395476e-07,
+          "cos_video_mean": 0.9999620318412781,
+          "cos_video_min": 0.9999209046363831,
+          "mse_video_mean": 7.41024095418652e-08,
+          "mse_video_max": 1.543268410841847e-07,
+          "speedup_vs_trt_bf16": 1.0,
+          "speedup_vs_pt_bf16": 0.4310604765933388
+        },
+        "int8_b4t3.engine": {
+          "precision": "int8",
+          "median_ms": 427.80877685546875,
+          "videos_per_s": 9.34997180142324,
+          "frames_per_s": 28.04991540426972,
+          "size_MiB": 340.67473220825195,
+          "cos_frame_mean": 0.9776608347892761,
+          "cos_frame_min": 0.9744707345962524,
+          "mse_frame_mean": 4.364978667581454e-05,
+          "mse_frame_max": 4.997022188035771e-05,
+          "cos_video_mean": 0.9795656800270081,
+          "cos_video_min": 0.9762841463088989,
+          "mse_video_mean": 3.9593556721229106e-05,
+          "mse_video_max": 4.6310284233186394e-05,
+          "speedup_vs_trt_bf16": 1.3808037671529454,
+          "speedup_vs_pt_bf16": 0.5952099299508262
+        },
+        "int8_b4t3_crl.engine": {
+          "precision": "int8",
+          "median_ms": 431.0753173828125,
+          "videos_per_s": 9.27912093015485,
+          "frames_per_s": 27.83736279046455,
+          "size_MiB": 340.70573806762695,
+          "cos_frame_mean": 0.9923521876335144,
+          "cos_frame_min": 0.9903231859207153,
+          "mse_frame_mean": 1.4942605048418045e-05,
+          "mse_frame_max": 1.8883743905462325e-05,
+          "cos_video_mean": 0.9930939674377441,
+          "cos_video_min": 0.9924779534339905,
+          "mse_video_mean": 1.3379776646615937e-05,
+          "mse_video_max": 1.4538205505232327e-05,
+          "speedup_vs_trt_bf16": 1.3703405110029567,
+          "speedup_vs_pt_bf16": 0.5906996337680939
+        }
+      },
+      "verdict": {
+        "int8_vs_trt_bf16_speedup": 1.3808037671529454,
+        "int8_video_accuracy_passes": false,
+        "diagnosis": "INT8 only marginally faster: re-run surgery.py to clear residual Q/DQ around layout-only ops",
+        "deploy_int8": false
+      }
+    }
+  }
+}
