@@ -384,30 +384,21 @@ def benchmark(
             return None
         return torch.stack(video_embeddings)
 
-    # Text-side helper for the isolated cos_sim measurement (mirrors
-    # FTPEService._postprocess_stage from L2 norm through alarm.update).
-    def _text_side(video_embeddings_BxD, stream_ids, user_params):
-        vis_vectors = video_embeddings_BxD / video_embeddings_BxD.norm(
-            dim=-1, keepdim=True,
-        )
-        category_preds: dict[str, list[bool]] = {}
+    # cos-sim dot-product helper (mirrors the inner matmul loop of
+    # FTPEService._postprocess_stage). JUST per-class (vis @ cat_txt[c])
+    # and (vis @ cat_normal[c]) plus .max(1). No L2 norm, no `>` compare,
+    # no alarm_event_manager.update.
+    def _cos_sim_dot(vis_vectors):
+        last = None
         for class_name in ABNORMAL_CLASS_NAMES:
             txt_vec = service.category_txt_vectors.get(class_name)
             normal_vec = service.category_normal_vectors.get(class_name)
             if txt_vec is None or normal_vec is None:
                 continue
-            sim_abn_max = (vis_vectors @ txt_vec).max(dim=1).values
-            sim_nrm_max = (vis_vectors @ normal_vec).max(dim=1).values
-            category_preds[class_name] = (
-                sim_abn_max > sim_nrm_max
-            ).detach().cpu().tolist()
-        predicts_per_stream = [
-            {cls: category_preds[cls][i] for cls in category_preds}
-            for i in range(len(stream_ids))
-        ]
-        return service.alarm_event_manager.update(
-            predicts_per_stream, stream_ids, user_params,
-        )
+            sim_abn = (vis_vectors @ txt_vec).max(dim=1).values
+            sim_nrm = (vis_vectors @ normal_vec).max(dim=1).values
+            last = (sim_abn, sim_nrm)
+        return last
 
     buffer_warmup = TEMPORAL_SIZE + service.window_size + 2
     for _ in range(buffer_warmup):
@@ -478,11 +469,10 @@ def benchmark(
         )
         samples["input_gen_and_load"].append(dt * 1000.0)
 
-        # cos_sim: isolated text-side block (L2 norm + 4× per-class cos-sim
-        # vs text features + comparison + alarm event manager).
-        _, dt = time_call(
-            lambda: _text_side(fixed_video_embs, stream_ids, user_params)
-        )
+        # cos_sim: isolated cost of the per-class cos-sim matmul. JUST the
+        # dot product + .max(1). No L2 norm, no `>` compare, no alarm
+        # event manager.
+        _, dt = time_call(lambda: _cos_sim_dot(fixed_video_embs))
         samples["cos_sim"].append(dt * 1000.0)
 
         per_iter_temp.append(query_gpu_temp_c())

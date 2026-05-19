@@ -94,13 +94,13 @@ ordered work units; `✓` = included in that stage's timed region, `—` = not.
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
 │ deque append per stream  (stream_vector_queues, maxlen=1)        │  ✓   │  —   │     —     │     —     │    —    │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
-│ mean-pool + cos-sim  (mean @ self.gpu_vectors.T)                 │  ✓   │  —   │     —     │     —     │    ✓    │
+│ mean-pool + cos-sim  (mean @ self.gpu_vectors.T)                 │  ✓   │  —   │     —     │     —     │  ✓ ⤴    │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
-│ _decide_top_category_opt  (TOP_CANDIDATE = 13 ranking)           │  ✓   │  —   │     —     │     —     │    ✓    │
+│ _decide_top_category_opt  (TOP_CANDIDATE = 13 ranking)           │  ✓   │  —   │     —     │     —     │    —    │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
-│ process_category  (append 1/0 to duration_queue per retEvent)    │  ✓   │  —   │     —     │     —     │    ✓    │
+│ process_category  (append 1/0 to duration_queue per retEvent)    │  ✓   │  —   │     —     │     —     │    —    │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
-│ check_alarm_duration  (STATUS_TRANSITION → alarms dict)          │  ✓   │  —   │     —     │     —     │    ✓    │
+│ check_alarm_duration  (STATUS_TRANSITION → alarms dict)          │  ✓   │  —   │     —     │     —     │    —    │
 └──────────────────────────────────────────────────────────────────┴──────┴──────┴───────────┴───────────┴─────────┘
 ```
 
@@ -111,8 +111,10 @@ Where each stage stops (the `⤴` arrow above):
 - `inference` stops at the same point but starts from a pre-cooked CUDA
   tensor (no preprocess).
 - `cos_sim` reads `service.stream_vector_queues` (already populated by the
-  earlier `full_cycle` call in this iter and by warmup), so it skips
-  everything up to the deque append and times only the alarm path.
+  earlier `full_cycle` call in this iter and by warmup) and times **only**
+  the per-stream `mean-pool + (mean @ self.gpu_vectors.T)`. The downstream
+  `_decide_top_category_opt` / `process_category` / `check_alarm_duration`
+  are NOT in the timed call.
 - `input_gen_and_load` runs only the random-frame generation, nothing else.
 
 ### FT_PE (`src/speed_calculate_FTPE.py`)
@@ -145,13 +147,13 @@ tick triggers an encode.
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
 │ torch.stack video_emb → (B_ready, 1024)                          │  ✓   │  ✓ ⤴ │     —     │     —     │    —    │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
-│ L2 norm of (B, 1024) video embeddings                            │  ✓   │  —   │     —     │     —     │    ✓    │
+│ L2 norm of (B, 1024) video embeddings                            │  ✓   │  —   │     —     │     —     │    —    │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
-│ per-class cos-sim  (vis @ cat_txt[c] and cat_normal[c]).max(1)   │  ✓   │  —   │     —     │     —     │    ✓    │
+│ per-class cos-sim  (vis @ cat_txt[c] and cat_normal[c]).max(1)   │  ✓   │  —   │     —     │     —     │  ✓ ⤴    │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
-│ (sim_abn_max > sim_nrm_max).cpu().tolist() per category          │  ✓   │  —   │     —     │     —     │    ✓    │
+│ (sim_abn_max > sim_nrm_max).cpu().tolist() per category          │  ✓   │  —   │     —     │     —     │    —    │
 ├──────────────────────────────────────────────────────────────────┼──────┼──────┼───────────┼───────────┼─────────┤
-│ alarm_event_manager.update  (duration_queue + status transition) │  ✓   │  —   │     —     │     —     │    ✓    │
+│ alarm_event_manager.update  (duration_queue + status transition) │  ✓   │  —   │     —     │     —     │    —    │
 └──────────────────────────────────────────────────────────────────┴──────┴──────┴───────────┴───────────┴─────────┘
 ```
 
@@ -164,7 +166,10 @@ Where each stage stops (the `⤴` arrow above):
   frame buffer, no mean-pool.
 - `cos_sim` reads a pre-stacked `(B, 1024)` `video_embeddings` tensor
   captured once after warmup, so it skips the entire vision side and
-  times only the text-side block.
+  times **only** the per-class `(vis @ cat_txt[c]).max(1)` /
+  `(vis @ cat_normal[c]).max(1)` dot-product loop. The L2 norm of
+  video_embeddings, the `> sim_normal` comparison + `.cpu().tolist()`
+  sync, and `alarm_event_manager.update` are NOT in the timed call.
 - `input_gen_and_load` runs only the random-frame generation, nothing else.
 
 `full_cycle` and `half_cycle` are both **one production tick** — they share

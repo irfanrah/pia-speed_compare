@@ -267,17 +267,23 @@ def benchmark(
         )
         samples["input_gen_and_load"].append(dt * 1000.0)
 
-        # cos_sim: isolated cost of the text-side block. PEEventManager.update
-        # does mean-pool over the per-stream deque, cos-sim vs text features,
-        # _decide_top_category_opt (top-K), process_category, and
+        # cos_sim: isolated cost of the per-stream mean-pool + cos-sim
+        # matmul against text features. Mirrors the inner loop of
+        # PEEventManager.update but stops right after the dot product --
+        # no top-K (_decide_top_category_opt), no process_category, no
         # check_alarm_duration. stream_vector_queues are populated by the
-        # earlier full_cycle / three_quarters_cycle calls in this iter, so
-        # the deque always has the latest visual_vector.
-        _, dt = time_call(
-            lambda: service.alarm_event_manager(
-                service.stream_vector_queues, stream_ids, user_params,
-            )
-        )
+        # earlier full_cycle call in this iter, so each deque has at least
+        # one real visual_vector.
+        aem = service.alarm_event_manager
+        gpu_vectors_T = aem.gpu_vectors.T
+        def _cos_sim():
+            last = None
+            for sid in stream_ids:
+                d = service.stream_vector_queues[sid]
+                meanpool = (sum(d) / len(d))[None, ::]
+                last = (meanpool @ gpu_vectors_T).squeeze(dim=0)
+            return last
+        _, dt = time_call(_cos_sim)
         samples["cos_sim"].append(dt * 1000.0)
 
         per_iter_temp.append(query_gpu_temp_c())
