@@ -35,11 +35,17 @@ Stage boundary convention (shared with the PE bench):
                           sync, no alarm_event_manager.update.
 
 The timed regions for ``full_cycle`` and ``half_cycle`` BOTH start at
-``_preprocess_stage`` with batches sourced from ``in_mem`` (one fresh
-batch generated before the timed loop). Input-prep cost is reported
-separately as ``input_gen_and_load``. Inputs are randomly generated
-(no disk I/O); the ``--image`` CLI flag is preserved for backwards compat
-but ignored.
+``_preprocess_stage`` with batches drawn from a **pre-generated input
+pool** (one big list of unique random (1080, 1920, 3) uint8 ndarrays
+materialized once at bench start, sized to cover every B-batch consumer:
+preprocessed_bt setup + _half_warm + buffer_warmup + cache warmup +
+measure loop's full/half pair). ``fresh_batches()`` returns the next B
+slots from the pool, .copy()-ing so cv_bgr2rgb_batch can mutate the
+consumer without trashing the source. Each fresh_batches() call advances
+the pool index, so every iter / stage sees disjoint random data.
+Input-prep cost is reported separately as ``input_gen_and_load`` (timed
+as a fresh ``gen_random_frame() × B``, not from the pool). The
+``--image`` CLI flag is preserved for backwards compat but ignored.
 
 ``full_cycle`` and ``half_cycle`` both reuse ``service.gather_frame_buffers``
 and ``service.frame_buffers``, so each call advances the per-stream state
@@ -244,9 +250,39 @@ def benchmark(
     stream_ids = [f"stream_{i}" for i in range(batch_size)]
     user_params = make_user_params(batch_size)
 
+    # --- Pre-generated input pool ---------------------------------------
+    # Total B-batches consumed by FT_PE in this bench run:
+    #   1                            preprocessed_bt setup (single_tick)
+    #   1                            _half_warm setup (prime cos_sim input)
+    #   (TEMPORAL_SIZE + T + 2)      buffer_warmup ticks of _detect
+    #   warmup_iters                 cache/JIT warmup _detect calls
+    #   2 * measure_iters            measure loop (full + half each iter)
+    # Pool sized to cover all of these as unique (1080, 1920, 3) uint8
+    # ndarrays so every B-batch consumer in the bench gets disjoint data.
+    buffer_warmup = TEMPORAL_SIZE + frames + 2
+    n_pool_batches = 2 + buffer_warmup + warmup_iters + 2 * measure_iters
+    _pool_rng = np.random.default_rng()
+    pool: list[np.ndarray] = [
+        _pool_rng.integers(0, 256, size=_FRAME_HW, dtype=np.uint8)
+        for _ in range(n_pool_batches * batch_size)
+    ]
+    pool_idx = [0]
+    print(f"[pool] generated {len(pool)} frames "
+          f"= {n_pool_batches} batches × {batch_size}  "
+          f"({len(pool) * np.prod(_FRAME_HW) / 1e9:.2f} GB)  "
+          f"(includes buffer_warmup={buffer_warmup} for T={frames})")
+
     def fresh_batches() -> list[np.ndarray]:
-        # Random per call -- no shared template, no disk I/O.
-        return [gen_random_frame() for _ in range(batch_size)]
+        """Take the next B ndarrays from the pre-generated pool. Each call
+        advances the index so consecutive calls see disjoint slices."""
+        i = pool_idx[0]
+        if i + batch_size > len(pool):
+            print(f"[pool] WARN: exhausted at {len(pool)} frames; wrapping",
+                  file=sys.stderr)
+            i = 0
+        batch = [arr.copy() for arr in pool[i:i + batch_size]]
+        pool_idx[0] = i + batch_size
+        return batch
 
     # --- Build a preprocessed (B, T, C, H, W) tensor for the inference-only
     # stage by replicating one tick's preprocessed frames across the temporal
@@ -319,8 +355,8 @@ def benchmark(
         return last
 
     # --- Prime the FTPEService temporal buffer so each measured tick (full
-    # OR half) actually produces a video embedding.
-    buffer_warmup = TEMPORAL_SIZE + service.window_size + 2
+    # OR half) actually produces a video embedding. The pool sizing above
+    # already reserved ``buffer_warmup`` batches for this loop.
     for _ in range(buffer_warmup):
         service._detect(
             batches=fresh_batches(), stream_ids=stream_ids, user_params=user_params,
@@ -347,8 +383,6 @@ def benchmark(
     per_iter_temp: list[float | None] = []
     t_start = query_gpu_temp_c()
 
-    in_mem = fresh_batches()  # ndarrays handed in from upstream (camera, RNG, ...)
-
     # Stash a (B, 1024) video_embeddings tensor for the cos_sim stage. The
     # text-side block doesn't actually care about the values -- the matmul
     # cost is independent of the input -- so we use one tick's video emb
@@ -361,25 +395,27 @@ def benchmark(
     fixed_video_embs = _half_warm.detach()
 
     for _ in range(measure_iters):
-        # full_cycle: one production tick of vision + text side, starting
-        # from in-memory ndarrays. _detect runs _preprocess_stage + the
-        # gather/frame buffer flow + model + per-stream mean + L2 norm +
-        # per-category cos-sim vs text features + alarm event manager.
-        # Buffers are primed by the warmup so every call yields a decision.
+        # full_cycle: one production tick of vision + text side. Input
+        # ndarrays come from the pre-generated pool via fresh_batches() --
+        # each call advances the pool index, so every measure iter (and
+        # each of full/half within it) sees a different B-slice. _detect
+        # runs _preprocess_stage + gather/frame buffer flow + model +
+        # per-stream mean + L2 norm + per-category cos-sim + alarm event
+        # manager. Both buffers are primed so every call yields a decision.
         def _full():
-            batches = [b.copy() for b in in_mem]
+            batches = fresh_batches()
             return service._detect(
                 batches=batches, stream_ids=stream_ids, user_params=user_params,
             )
         _, dt = time_call(_full)
         samples["full_cycle"].append(dt * 1000.0)
 
-        # half_cycle: same start point as full_cycle (in-mem ndarrays through
-        # _preprocess_stage), stops at the per-stream video embedding
+        # half_cycle: same pool-backed start point as full_cycle through
+        # _preprocess_stage, stops at the per-stream video embedding
         # (B, 1024). Differs from full_cycle only in the text-side block,
         # so by construction half_cycle <= full_cycle.
         def _half():
-            batches = [b.copy() for b in in_mem]
+            batches = fresh_batches()
             x = service._preprocess_stage(batches, user_params)
             return _postprocess_to_video_emb(x, stream_ids)
         _, dt = time_call(_half)
