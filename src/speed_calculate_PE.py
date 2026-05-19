@@ -29,6 +29,10 @@ Stage boundary convention (shared with the FT_PE bench):
     inference:             already-preprocessed CUDA tensor -> _inference_stage
                            (stops at visual emb (B, 1024); no preprocess,
                             no text)
+    disk_read:             isolated cost of B ndarrays from disk
+                           (PIL.Image.open + decode + np.array)
+    cos_sim:               isolated text-side block (mean-pool + cos sim vs
+                           text features + top-K + alarm event manager)
 
 GPU temperature is polled per iter via NVML when ``pynvml`` is installed,
 falling back to nvidia-smi otherwise.
@@ -197,6 +201,8 @@ def benchmark(
         "three_quarters_cycle": [],
         "half_cycle": [],
         "inference": [],
+        "disk_read": [],
+        "cos_sim": [],
     }
     per_iter_temp: list[float | None] = []
     t_start = query_gpu_temp_c()
@@ -238,6 +244,27 @@ def benchmark(
         _, dt = time_call(lambda: service._inference_stage(preprocessed))
         samples["inference"].append(dt * 1000.0)
 
+        # disk_read: isolated cost of loading B ndarrays from disk
+        # (PIL.Image.open + decode + np.array). Equals full_cycle minus
+        # three_quarters_cycle in expectation.
+        _, dt = time_call(
+            lambda: [load_image_ndarray(image_path) for _ in range(batch_size)]
+        )
+        samples["disk_read"].append(dt * 1000.0)
+
+        # cos_sim: isolated cost of the text-side block. PEEventManager.update
+        # does mean-pool over the per-stream deque, cos-sim vs text features,
+        # _decide_top_category_opt (top-K), process_category, and
+        # check_alarm_duration. stream_vector_queues are populated by the
+        # earlier full_cycle / three_quarters_cycle calls in this iter, so
+        # the deque always has the latest visual_vector.
+        _, dt = time_call(
+            lambda: service.alarm_event_manager(
+                service.stream_vector_queues, stream_ids, user_params,
+            )
+        )
+        samples["cos_sim"].append(dt * 1000.0)
+
         per_iter_temp.append(query_gpu_temp_c())
 
     t_end = query_gpu_temp_c()
@@ -254,6 +281,8 @@ def benchmark(
         "three_quarters_cycle_ms": [round(v, 3) for v in samples["three_quarters_cycle"]],
         "half_cycle_ms":           [round(v, 3) for v in samples["half_cycle"]],
         "inference_ms":            [round(v, 3) for v in samples["inference"]],
+        "disk_read_ms":            [round(v, 3) for v in samples["disk_read"]],
+        "cos_sim_ms":              [round(v, 3) for v in samples["cos_sim"]],
         "gpu_temp_c":              [round(t, 1) if t is not None else None for t in per_iter_temp],
     }
 
