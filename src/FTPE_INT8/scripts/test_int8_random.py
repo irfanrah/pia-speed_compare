@@ -222,41 +222,59 @@ def main() -> int:
         raise FileNotFoundError(f"no .engine files under {args.engine_dir}")
     print(f"[test] found {len(engines)} engines: "
           f"{[os.path.basename(e) for e in engines]}")
-    runners = {}
+
+    rng = np.random.default_rng(args.seed)
+
+    # Pre-generate the inputs ONCE (deterministic seed) so every engine sees
+    # the same BT random tensors and the comparison is apples-to-apples.
+    # Each TRT engine is then loaded → run → freed in sequence so the dynamic
+    # engine's pre-allocated workspace for the OPT shape doesn't pile up
+    # alongside the PT BF16 model on a single 16 GB A4000.
+    inputs_x: List[torch.Tensor] = []
+    pt_embs: List[torch.Tensor] = []
+    print(f"\n[test] precomputing {args.iters} random-batch PT references ...")
+    for _ in range(args.iters):
+        frames = gen_random_frames(bt, rng=rng)
+        x = preprocess(frames, size=img_size, device=device)        # (BT, 3, H, W) float32
+        pt_emb = pt_bf16_forward(model, x)                          # (BT, D) float32, L2-norm
+        inputs_x.append(x)
+        pt_embs.append(pt_emb)
+    print(f"[test] freeing PT BF16 to make room for TRT contexts ...")
+    del model
+    torch.cuda.empty_cache()
+
+    # Per-engine cos / mse accumulators, populated by running each engine in
+    # sequence on the pre-computed inputs.
+    acc: Dict[str, Dict[str, List[float]]] = {}
     for ep in engines:
         name = os.path.splitext(os.path.basename(ep))[0]
         rn = TRTEngine(ep)
         if not rn.fits(bt):
             print(f"  skipping {name}: profile {rn.min_shape}..{rn.max_shape} "
                   f"does not include BT={bt}")
+            del rn
+            torch.cuda.empty_cache()
             continue
-        runners[name] = rn
-    if not runners:
-        raise RuntimeError(f"no engine accepts BT={bt}")
-
-    rng = np.random.default_rng(args.seed)
-
-    # Aggregate cos / mse across iters.
-    acc: Dict[str, Dict[str, List[float]]] = {n: {"cos": [], "mse": []} for n in runners}
-
-    print(f"\n[test] running {args.iters} random-batch iters ...")
-    for it in range(args.iters):
-        frames = gen_random_frames(bt, rng=rng)
-        x = preprocess(frames, size=img_size, device=device)        # (BT, 3, H, W) float32
-        pt_emb = pt_bf16_forward(model, x)                          # (BT, D) float32, L2-norm
-        for name, rn in runners.items():
-            trt_emb = rn.forward(x).float()                          # (BT, D) float32
-            # The TRT engine output isn't guaranteed L2-normed (depends on whether
-            # encode_video's `normalize=True` is baked into the exported graph;
-            # in this repo's export_onnx it is). Re-normalize defensively so the
-            # cos compares directions, not magnitudes.
+        acc[name] = {"cos": [], "mse": []}
+        for it in range(args.iters):
+            x = inputs_x[it]
+            pt_emb = pt_embs[it]
+            trt_emb = rn.forward(x).float()
+            # Defensive L2 norm — the exported PE graph emits normalize=True
+            # already, but we sanity-renormalize to compare directions even
+            # if a future export forgets the flag.
             trt_emb = trt_emb / trt_emb.norm(dim=-1, keepdim=True).clamp_min(1e-12)
-            cos = F.cosine_similarity(pt_emb, trt_emb, dim=-1)       # (BT,)
-            mse = ((pt_emb - trt_emb) ** 2).mean(dim=-1)             # (BT,)
+            cos = F.cosine_similarity(pt_emb, trt_emb, dim=-1)
+            mse = ((pt_emb - trt_emb) ** 2).mean(dim=-1)
             acc[name]["cos"].append(float(cos.mean()))
             acc[name]["mse"].append(float(mse.mean()))
-        if it == 0:
-            print(f"  iter {it}: first-iter cos={[round(acc[n]['cos'][0], 4) for n in runners]}")
+        print(f"  {name}: iter-0 cos={acc[name]['cos'][0]:.4f}")
+        # Free GPU resources before loading the next engine.
+        del rn
+        torch.cuda.empty_cache()
+    if not acc:
+        raise RuntimeError(f"no engine accepts BT={bt}")
+    runners = acc  # downstream code expects `runners` keyed by engine name
 
     print(f"\n[test] results (mean over {args.iters} iters)\n")
     any_fail = False
