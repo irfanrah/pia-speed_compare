@@ -1,21 +1,16 @@
 """Speed benchmark for perception_encoder via the real PEService pipeline.
 
 Instantiates ``pia_prod.AI.modules.perception_encoder.service.PEService`` and
-times four split stages exposed in ``_detect`` -- the same code path
-production runs.
+times five split stages -- the same code paths production runs.
 
 Stage boundary convention (shared with the FT_PE bench):
     * ``half_cycle`` is the **video-side** pipeline -- everything up to and
       including the latest per-stream **video embedding** ``(B, 1024)``. PE
       has no temporal model and ``TEMPORAL_SIZE = 1``, so the per-stream
       video embedding is the per-image visual vector itself.
-    * ``three_quarters_cycle`` is identical to ``full_cycle`` minus the disk
-      read -- frames are already in RAM (e.g. handed in by a camera buffer)
-      when the timed call starts.
-    * The moment any text-side work runs (text embeddings, cos-sim against
-      text features, top-K, alarm event manager), the timing is no longer
-      ``half_cycle`` -- that work lives only in the full/three-quarters
-      stages.
+    * The moment any text-side work runs (cos-sim against text features,
+      top-K, alarm event manager), the timing is no longer ``half_cycle``
+      -- that work lives only in ``full_cycle``.
 
     full_cycle:           _preprocess_stage -> _inference_stage
                           -> _postprocess_stage
@@ -30,8 +25,10 @@ Stage boundary convention (shared with the FT_PE bench):
     input_gen_and_load:   isolated cost of producing B random 1080p uint8
                           ndarrays (the "load from disk / camera buffer"
                           stand-in at the start of a production tick)
-    cos_sim:              isolated text-side block (mean-pool + cos sim vs
-                          text features + top-K + alarm event manager)
+    cos_sim:              isolated per-stream mean-pool + cos-sim matmul
+                          (sum(deque)/len @ self.gpu_vectors.T). Stops at
+                          the dot product -- no top-K, no process_category,
+                          no check_alarm_duration.
 
 The timed regions for ``full_cycle`` and ``half_cycle`` BOTH start at
 ``_preprocess_stage`` with batches sourced from ``in_mem`` (a single fresh

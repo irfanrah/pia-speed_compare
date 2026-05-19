@@ -28,8 +28,11 @@ Stage boundary convention (shared with the PE bench):
                            preprocess, no mean-pool, no text)
     input_gen_and_load:   isolated cost of B random 1080p uint8 ndarrays
                           ("load from disk / camera buffer" stand-in)
-    cos_sim:              isolated text-side block (L2 norm + per-class
-                          cos sim vs text features + alarm event manager)
+    cos_sim:              isolated per-class cos-sim matmul, per category:
+                          (vis @ cat_txt[c]).max(1) and (vis @ cat_normal[c]).max(1).
+                          Stops at the dot product -- no L2 norm of
+                          video_embs, no `>` comparison + .cpu().tolist()
+                          sync, no alarm_event_manager.update.
 
 The timed regions for ``full_cycle`` and ``half_cycle`` BOTH start at
 ``_preprocess_stage`` with batches sourced from ``in_mem`` (one fresh
@@ -409,10 +412,10 @@ def benchmark(
 
     stage_stats = {k: stats(v) for k, v in samples.items()}
     # Unit: frames encoded per second (B*T per tick / per call).
-    #   - full / three_quarters / half_cycle: stride=1 with window_size=T
-    #     means each tick re-encodes a (B, T) window = B*T frames per tick.
+    #   - full / half_cycle: stride=1 with window_size=T means each tick
+    #     re-encodes a (B, T) window = B*T frames per tick.
     #   - inference: one call encodes a (B, T) tensor, i.e. B*T frames.
-    # All four are directly comparable. Per-tick *input* rate (production
+    # All three are directly comparable. Per-tick *input* rate (production
     # streams per second) is reported separately for the tick-based stages.
     total_frames = batch_size * frames
     throughput = {
