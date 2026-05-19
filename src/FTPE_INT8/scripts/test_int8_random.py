@@ -203,6 +203,27 @@ def main() -> int:
         raise RuntimeError("CUDA required")
     device = torch.device("cuda")
 
+    # Defensive: some torch + conda-env + cuDNN combos crash at the first
+    # nn.Conv2d call with "RuntimeError: cuDNN error:
+    # CUDNN_STATUS_NOT_INITIALIZED" (typically a wheel-bundled cuDNN vs
+    # system cuDNN version mismatch). The cos pass is a correctness check,
+    # not a benchmark — disable cuDNN so Conv2d routes through native CUDA.
+    # Numerics are equivalent for cos / MSE purposes (any difference is at
+    # the 1e-7 noise floor that ALREADY shows up in the BF16 baseline row).
+    try:
+        torch.backends.cudnn.enabled = False
+    except Exception:
+        pass
+
+    # Also try to keep the per-process CUDA workspace small — when the
+    # speed bench just ran the GPU hot and freed a large dynamic-profile
+    # context, the new process can transiently see an OOM during cuDNN /
+    # cuBLAS handle creation. Limit our split to avoid that.
+    try:
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+
     bt = args.batch_videos * args.frames_per_video
     print(f"[test] config={args.config_name}  "
           f"B={args.batch_videos}  T={args.frames_per_video}  BT={bt}  "

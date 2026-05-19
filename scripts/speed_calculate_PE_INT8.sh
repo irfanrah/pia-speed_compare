@@ -109,7 +109,14 @@ PE_INT8_ENGINE_DIR="$(dirname "$PE_INT8_ENGINE")"
 # different libcudnn earlier on LD_LIBRARY_PATH triggers a version mismatch
 # inside ``nn.Conv2d``'s cuDNN init (CUDNN_STATUS_NOT_INITIALIZED). The cos
 # pass uses only torch + TensorRT — both find their own CUDA libs without
-# manual help.
+# manual help. The cos script itself also disables cuDNN as a belt-and-
+# braces guard against wheel/system cuDNN mismatches that show up in some
+# conda envs (test_int8_random.py sets ``cudnn.enabled = False``).
+
+# Brief settle: give CUDA a moment to release the bench process's
+# dynamic-profile context (it pre-allocates ~6 GB on FT_PE / ~3 GB on PE
+# at the OPT shape; teardown can lag a few hundred ms).
+sleep 2
 
 echo
 echo "[PE_INT8] === random-image cos/MSE vs PT BF16 ==="
