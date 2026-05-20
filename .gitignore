@@ -20,6 +20,10 @@ assets/QAT
 # HF cache (PT checkpoints + datasets downloaded by run_int8_pipeline.sh)
 src/FTPE_INT8/.hf_cache/
 
+# INT8 pipeline outputs (engines + ONNX, multi-GB each)
+int8_run_pe/
+int8_run_ftpe/
+
 # Benchmark runtime artifacts
 logs/
 

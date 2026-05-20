@@ -1,0 +1,25 @@
+[FT_PE] engine: assets/model/FT_PE-Core-L14-336_260318_vision_no_mean_pooling.engine
+[FT_PE] text features: assets/model/FT_text_features.json
+[FT_PE] batch=42 frames=3 warmup=5 iters=25
+[prepare] ONNX already at assets/model/FT_text_features.json (2.1 MB)
+[prepare] engine already at assets/model/FT_PE-Core-L14-336_260318_vision_no_mean_pooling.engine (642.9 MB) - skipping
+/root/miniconda3/envs/pia-speed/lib/python3.12/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+model:  FT_PE (ft_pe)  via FTPEService._detect
+engine: assets/model/FT_PE-Core-L14-336_260318_vision_no_mean_pooling.engine
+txtfts: assets/model/FT_text_features.json
+T:      3  (window_size driven by --frames)
+image:  /root/kurnianto/pia-speed_compare/assets/images/kkpolice_1.jpg
+gpu:    NVIDIA RTX A5000  (sm 8.6, 24247 MiB)
+batch:  42  frames: 3  warmup: 5  iters: 25
+start:  2026-05-19T16:36:48
+[pool] generated 1806 frames = 43 batches × 42  (11.23 GB)  (includes buffer_warmup=13 for T=3)
+
+  full_cycle   mean=1199.469 ms  std= 67.597  p95=1286.569 ms  thr=  105.0 img/s
+  half_cycle   mean=1198.635 ms  std= 67.449  p95=1285.607 ms  thr=  105.1 img/s
+  inference    mean= 838.359 ms  std=  3.933  p95= 843.674 ms  thr=  150.3 img/s
+  input_gen_and_load  mean= 292.798 ms  std= 54.602  p95= 358.111 ms  thr=  430.3 img/s
+  cos_sim      mean=   0.440 ms  std=  0.093  p95=   0.523 ms  thr=286363.6 img/s
+
+GPU temp: 62.0 -> 66.0 C  (min=61.0, max=67.0)
+wrote: /root/kurnianto/pia-speed_compare/results/ftpe_NVIDIA_RTX_A5000_b42_t3_20260519_163648.json

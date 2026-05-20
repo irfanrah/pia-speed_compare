@@ -1,0 +1,124 @@
+15:19:02 B=10  PE           OK      28s
+15:19:32 B=10  FT_PE        OK      30s
+15:19:32 B=10  PE_INT8      FAIL     0s  rc=1
+15:19:32 B=10  FT_PE_INT8   FAIL     0s  rc=1
+15:23:02 B=12  PE           OK      30s
+15:23:36 B=12  FT_PE        OK      34s
+15:23:36 B=12  PE_INT8      FAIL     0s  rc=1
+15:23:36 B=12  FT_PE_INT8   FAIL     0s  rc=1
+15:27:06 B=14  PE           OK      30s
+15:27:46 B=14  FT_PE        OK      40s
+15:27:46 B=14  PE_INT8      FAIL     0s  rc=1
+15:27:46 B=14  FT_PE_INT8   FAIL     0s  rc=1
+15:31:20 B=16  PE           OK      34s
+15:32:03 B=16  FT_PE        OK      43s
+15:32:03 B=16  PE_INT8      FAIL     0s  rc=1
+15:32:03 B=16  FT_PE_INT8   FAIL     0s  rc=1
+15:35:38 B=18  PE           OK      35s
+15:36:27 B=18  FT_PE        OK      49s
+15:36:27 B=18  PE_INT8      FAIL     0s  rc=1
+15:36:27 B=18  FT_PE_INT8   FAIL     0s  rc=1
+15:40:07 B=20  PE           OK      40s
+15:41:01 B=20  FT_PE        OK      53s
+15:41:01 B=20  PE_INT8      FAIL     0s  rc=1
+15:41:01 B=20  FT_PE_INT8   FAIL     0s  rc=1
+15:44:42 B=22  PE           OK      41s
+15:45:39 B=22  FT_PE        OK      57s
+15:45:39 B=22  PE_INT8      FAIL     0s  rc=1
+15:45:40 B=22  FT_PE_INT8   FAIL     0s  rc=1
+15:49:22 B=24  PE           OK      42s
+15:50:21 B=24  FT_PE        OK      59s
+15:50:21 B=24  PE_INT8      FAIL     0s  rc=1
+15:50:21 B=24  FT_PE_INT8   FAIL     0s  rc=1
+15:54:09 B=26  PE           OK      48s
+15:55:15 B=26  FT_PE        OK      66s
+15:55:15 B=26  PE_INT8      FAIL     0s  rc=1
+15:55:15 B=26  FT_PE_INT8   FAIL     0s  rc=1
+15:59:05 B=28  PE           OK      50s
+16:00:14 B=28  FT_PE        OK      69s
+16:00:14 B=28  PE_INT8      FAIL     0s  rc=1
+16:00:14 B=28  FT_PE_INT8   FAIL     0s  rc=1
+16:04:06 B=30  PE           OK      52s
+16:05:22 B=30  FT_PE        OK      76s
+16:05:22 B=30  PE_INT8      FAIL     0s  rc=1
+16:05:22 B=30  FT_PE_INT8   FAIL     0s  rc=1
+16:09:16 B=32  PE           OK      54s
+16:10:36 B=32  FT_PE        OK      80s
+16:10:36 B=32  PE_INT8      FAIL     0s  rc=1
+16:10:36 B=32  FT_PE_INT8   FAIL     0s  rc=1
+16:14:32 B=34  PE           OK      56s
+16:15:54 B=34  FT_PE        OK      82s
+16:15:54 B=34  PE_INT8      FAIL     0s  rc=1
+16:15:54 B=34  FT_PE_INT8   FAIL     0s  rc=1
+16:19:53 B=36  PE           OK      59s
+16:21:22 B=36  FT_PE        OK      89s
+16:21:22 B=36  PE_INT8      FAIL     0s  rc=1
+16:21:22 B=36  FT_PE_INT8   FAIL     0s  rc=1
+16:25:23 B=38  PE           OK      61s
+16:26:57 B=38  FT_PE        OK      94s
+16:26:57 B=38  PE_INT8      FAIL     0s  rc=1
+16:26:57 B=38  FT_PE_INT8   FAIL     0s  rc=1
+16:31:01 B=40  PE           OK      64s
+16:32:38 B=40  FT_PE        OK      97s
+16:32:38 B=40  PE_INT8      FAIL     0s  rc=1
+16:32:38 B=40  FT_PE_INT8   FAIL     0s  rc=1
+16:36:44 B=42  PE           OK      66s
+16:38:24 B=42  FT_PE        OK     100s
+16:38:24 B=42  PE_INT8      FAIL     0s  rc=1
+16:38:24 B=42  FT_PE_INT8   FAIL     0s  rc=1
+16:42:33 B=44  PE           OK      69s
+16:44:18 B=44  FT_PE        OK     105s
+16:44:18 B=44  PE_INT8      FAIL     0s  rc=1
+16:44:18 B=44  FT_PE_INT8   FAIL     0s  rc=1
+16:48:31 B=46  PE           OK      73s
+16:50:17 B=46  FT_PE        OK     106s
+16:50:17 B=46  PE_INT8      FAIL     0s  rc=1
+16:50:17 B=46  FT_PE_INT8   FAIL     0s  rc=1
+16:54:28 B=48  PE           OK      71s
+16:56:17 B=48  FT_PE        OK     109s
+16:56:17 B=48  PE_INT8      FAIL     0s  rc=1
+16:56:17 B=48  FT_PE_INT8   FAIL     0s  rc=1
+17:00:34 B=50  PE           OK      77s
+17:02:27 B=50  FT_PE        OK     113s
+17:02:27 B=50  PE_INT8      FAIL     0s  rc=1
+17:02:27 B=50  FT_PE_INT8   FAIL     0s  rc=1
+17:06:46 B=52  PE           OK      79s
+17:08:46 B=52  FT_PE        OK     120s
+17:08:46 B=52  PE_INT8      FAIL     0s  rc=1
+17:08:46 B=52  FT_PE_INT8   FAIL     0s  rc=1
+17:13:09 B=54  PE           OK      83s
+17:15:08 B=54  FT_PE        OK     119s
+17:15:08 B=54  PE_INT8      FAIL     0s  rc=1
+17:15:08 B=54  FT_PE_INT8   FAIL     0s  rc=1
+17:19:31 B=56  PE           OK      83s
+17:21:36 B=56  FT_PE        OK     125s
+17:21:36 B=56  PE_INT8      FAIL     0s  rc=1
+17:21:36 B=56  FT_PE_INT8   FAIL     0s  rc=1
+17:26:00 B=58  PE           OK      84s
+17:28:15 B=58  FT_PE        OK     135s
+17:28:15 B=58  PE_INT8      FAIL     0s  rc=1
+17:28:15 B=58  FT_PE_INT8   FAIL     0s  rc=1
+17:32:36 B=60  PE           OK      81s
+17:34:52 B=60  FT_PE        OK     136s
+17:34:52 B=60  PE_INT8      FAIL     0s  rc=1
+17:34:52 B=60  FT_PE_INT8   FAIL     0s  rc=1
+17:39:21 B=62  PE           OK      89s
+17:41:49 B=62  FT_PE        OK     147s
+17:41:49 B=62  PE_INT8      FAIL     0s  rc=1
+17:41:49 B=62  FT_PE_INT8   FAIL     0s  rc=1
+17:46:21 B=64  PE           OK      92s
+17:48:41 B=64  FT_PE        OK     140s
+17:48:41 B=64  PE_INT8      FAIL     0s  rc=1
+17:48:41 B=64  FT_PE_INT8   FAIL     0s  rc=1
+17:53:14 B=66  PE           OK      93s
+17:55:49 B=66  FT_PE        OK     155s
+17:55:49 B=66  PE_INT8      FAIL     0s  rc=1
+17:55:49 B=66  FT_PE_INT8   FAIL     0s  rc=1
+18:00:24 B=68  PE           OK      95s
+18:02:53 B=68  FT_PE        OK     149s
+18:02:53 B=68  PE_INT8      FAIL     0s  rc=1
+18:02:53 B=68  FT_PE_INT8   FAIL     0s  rc=1
+18:07:24 B=70  PE           OK      91s
+18:09:56 B=70  FT_PE        OK     152s
+18:09:56 B=70  PE_INT8      FAIL     0s  rc=1
+18:09:56 B=70  FT_PE_INT8   FAIL     0s  rc=1

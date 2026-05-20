@@ -1,0 +1,10 @@
+[PE_INT8] INT8 engine:    assets/QAT/pe/engines/int8_pe_dyn_b1-16_t1.engine
+[PE_INT8] text features:  assets/model/text_features.json
+[PE_INT8] batch=36 warmup=5 iters=25
+[PE_INT8] ERR: INT8 engine not found: assets/QAT/pe/engines/int8_pe_dyn_b1-16_t1.engine
+[PE_INT8]      Build the static deploy engine via
+[PE_INT8]        VARIANT=pe bash src/FTPE_INT8/scripts/run_int8_pipeline.sh
+[PE_INT8]      then build a dynamic test engine from the resulting clean ONNX
+[PE_INT8]      (see the comment block at the top of this script for the exact
+[PE_INT8]      build_dynamic_engine.py command). Or set
+[PE_INT8]      PE_INT8_ENGINE=/path/to/your/engine.engine

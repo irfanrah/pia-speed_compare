@@ -1,0 +1,8 @@
+[FT_PE_INT8] INT8 engine:        assets/QAT/ftpe/engines/int8_ftpe_dyn_b4-128_t3_crl.engine
+[FT_PE_INT8] BF16 bootstrap:     assets/model/FT_PE-Core-L14-336_260318_vision_no_mean_pooling.engine
+[FT_PE_INT8] text features:      assets/model/FT_text_features.json
+[FT_PE_INT8] batch=32 frames=3 warmup=5 iters=25
+[FT_PE_INT8] ERR: INT8 engine not found: assets/QAT/ftpe/engines/int8_ftpe_dyn_b4-128_t3_crl.engine
+[FT_PE_INT8]      Build it via
+[FT_PE_INT8]        VARIANT=ftpe bash src/FTPE_INT8/scripts/run_int8_pipeline.sh
+[FT_PE_INT8]      Or set FTPE_INT8_ENGINE=/path/to/your/engine.engine

@@ -1,0 +1,24 @@
+[PE] engine: assets/model/PE-Core-L14-336.engine
+[PE] text features: assets/model/text_features.json
+[PE] batch=34 warmup=5 iters=25
+[prepare] ONNX already at assets/model/text_features.json (473.3 MB)
+[prepare] engine already at assets/model/PE-Core-L14-336.engine (642.1 MB) - skipping
+/root/miniconda3/envs/pia-speed/lib/python3.12/site-packages/torch/cuda/__init__.py:61: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+model:  PE (perception_encoder)  via PEService._detect
+engine: assets/model/PE-Core-L14-336.engine
+txtfts: assets/model/text_features.json
+image:  /root/kurnianto/pia-speed_compare/assets/images/kkpolice_1.jpg
+gpu:    NVIDIA RTX A5000  (sm 8.6, 24247 MiB)
+batch:  34    warmup: 5    iters: 25
+start:  2026-05-19T16:13:40
+[pool] generated 1020 frames = 30 batches × 34  (6.35 GB)
+
+  full_cycle   mean= 605.996 ms  std= 34.624  p95= 651.461 ms  thr=   56.1 img/s
+  half_cycle   mean= 589.516 ms  std= 34.219  p95= 634.324 ms  thr=   57.7 img/s
+  inference    mean= 354.987 ms  std=  1.449  p95= 357.203 ms  thr=   95.8 img/s
+  input_gen_and_load  mean= 236.477 ms  std= 25.268  p95= 287.901 ms  thr=  143.8 img/s
+  cos_sim      mean=   3.079 ms  std=  0.083  p95=   3.258 ms  thr=11042.5 img/s
+
+GPU temp: 42.0 -> 54.0 C  (min=42.0, max=55.0)
+wrote: /root/kurnianto/pia-speed_compare/results/pe_NVIDIA_RTX_A5000_b34_20260519_161340.json
