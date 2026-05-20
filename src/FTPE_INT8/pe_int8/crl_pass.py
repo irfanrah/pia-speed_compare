@@ -171,7 +171,10 @@ def calibrate_per_channel_max(model, init_map: Dict[str, np.ndarray],
     # Save to a temp file so onnxruntime can resolve external-data
     # references relative to the original onnx file location.
     print(f"[crl] persisting CRL-instrumented onnx for ORT session")
-    tmp_path = "/tmp/exp7_crl_work/onnx/_crl_calib.onnx"
+    tmp_path = os.environ.get(
+        "CRL_TMP_ONNX",
+        f"/tmp/exp7_crl_work_{os.getuid()}/onnx/_crl_calib.onnx",
+    )
     os.makedirs(os.path.dirname(tmp_path), exist_ok=True)
     onnx.save(model, tmp_path,
               save_as_external_data=True,

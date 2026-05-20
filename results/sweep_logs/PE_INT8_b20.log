@@ -1,0 +1,51 @@
+[PE_INT8] INT8 engine:    assets/QAT/pe/engines/int8_pe_dyn_b1-80_t1.engine
+[PE_INT8] text features:  assets/model/text_features.json
+[PE_INT8] batch=20 warmup=5 iters=25
+model:  PE (perception_encoder)  via PEService._detect
+engine: assets/QAT/pe/engines/int8_pe_dyn_b1-80_t1.engine
+txtfts: assets/model/text_features.json
+image:  /home/piawsa6000/kurnianto/pia-speed_compare/assets/images/kkpolice_1.jpg
+gpu:    NVIDIA RTX A6000  (sm 8.6, 48676 MiB)
+batch:  20    warmup: 5    iters: 25
+start:  2026-05-20T00:50:31
+[pool] generated 600 frames = 30 batches × 20  (3.73 GB)
+
+  full_cycle   mean= 147.852 ms  std=  0.868  p95= 149.250 ms  thr=  135.3 img/s
+  half_cycle   mean= 140.280 ms  std=  0.838  p95= 141.636 ms  thr=  142.6 img/s
+  inference    mean=  74.570 ms  std=  0.258  p95=  74.966 ms  thr=  268.2 img/s
+  input_gen_and_load  mean=  92.210 ms  std=  2.621  p95=  93.665 ms  thr=  216.9 img/s
+  cos_sim      mean=   1.793 ms  std=  0.011  p95=   1.804 ms  thr=11154.5 img/s
+
+GPU temp: 34.0 -> 34.0 C  (min=34.0, max=34.0)
+wrote: /home/piawsa6000/kurnianto/pia-speed_compare/results/pe_NVIDIA_RTX_A6000_b20_20260520_005031_int8.json
+
+[PE_INT8] === random-image cos/MSE vs PT BF16 ===
+[PE_INT8] engines:    assets/QAT/pe/engines
+[PE_INT8] PT ckpt:    src/FTPE_INT8/.hf_cache/pe/splitqkv_qat/qat_deploy_fp32.pt
+[PE_INT8] B=20  T=1  iters=5  min_cos=0.99  max_mse=1e-3
+[05/20/2026-00:51:01] [TRT] [W] Using default stream in enqueueV3() may lead to performance issues due to additional calls to cudaStreamSynchronize() by TensorRT to ensure correct synchronization. Please use non-default stream instead.
+[test] config=PE-Core-L14-336  B=20  T=1  BT=20  iters=5
+[test] ft_ckpt: src/FTPE_INT8/.hf_cache/pe/splitqkv_qat/qat_deploy_fp32.pt
+[test] engine_dir: assets/QAT/pe/engines
+[test] loading PT BF16 reference ...
+   [ft_loader] detected QKV layout: split  arch: PE-Core-L14-336-splitqkv
+[test] PT BF16 loaded in 4.6s  (image_size=336)
+[test] found 4 engines: ['bf16_pe_b16t1.engine', 'int8_pe_b16t1.engine', 'int8_pe_b16t1_crl.engine', 'int8_pe_dyn_b1-80_t1.engine']
+
+[test] precomputing 5 random-batch PT references ...
+[test] freeing PT BF16 to make room for TRT contexts ...
+  skipping bf16_pe_b16t1: profile (16, 3, 336, 336)..(16, 3, 336, 336) does not include BT=20
+  skipping int8_pe_b16t1: profile (16, 3, 336, 336)..(16, 3, 336, 336) does not include BT=20
+  skipping int8_pe_b16t1_crl: profile (16, 3, 336, 336)..(16, 3, 336, 336) does not include BT=20
+  int8_pe_dyn_b1-80_t1: iter-0 cos=0.9430
+
+[test] results (mean over 5 iters)
+
+  engine                                                   cos          mse   verdict
+  --------------------------------------------------------------------------------
+  int8_pe_dyn_b1-80_t1                                0.942722    1.119e-04   FAIL
+
+[test] thresholds: cos >= 0.99   mse <= 1e-03
+[test] appended cos_mse section to: /home/piawsa6000/kurnianto/pia-speed_compare/results/pe_NVIDIA_RTX_A6000_b20_20260520_005031_int8.json
+[test] FAIL — one or more engines did not meet the threshold
+[PE_INT8] cos/MSE check exited non-zero (engine(s) below threshold)

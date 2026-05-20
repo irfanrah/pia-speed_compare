@@ -1,0 +1,57 @@
+[FT_PE_INT8] INT8 engine:        assets/QAT/ftpe/engines/int8_ftpe_dyn_b4-128_t3_crl.engine
+[FT_PE_INT8] BF16 bootstrap:     assets/model/FT_PE-Core-L14-336_260318_vision_no_mean_pooling.engine
+[FT_PE_INT8] text features:      assets/model/FT_text_features.json
+[FT_PE_INT8] batch=16 frames=3 warmup=5 iters=25
+model:  FT_PE_INT8 (T=3 canonical)  via FTPEService._detect (model swapped)
+engine: assets/QAT/ftpe/engines/int8_ftpe_dyn_b4-128_t3_crl.engine
+bootstrap engine: assets/model/FT_PE-Core-L14-336_260318_vision_no_mean_pooling.engine
+txtfts: assets/model/FT_text_features.json
+T:      3  (window_size driven by --frames)
+image:  /home/piawsa6000/kurnianto/pia-speed_compare/assets/images/kkpolice_1.jpg
+gpu:    NVIDIA RTX A6000  (sm 8.6, 48676 MiB)
+batch:  16  frames: 3  warmup: 5  iters: 25
+start:  2026-05-20T00:39:59
+[pool] generated 1120 frames = 70 batches × 16  (6.97 GB)  (includes buffer_warmup=13 for T=3)
+
+  full_cycle              mean= 215.733 ms  std=  1.345  p95= 217.712 ms  thr=  222.5 img/s
+  half_cycle              mean= 214.202 ms  std=  1.013  p95= 216.251 ms  thr=  224.1 img/s
+  inference               mean= 162.728 ms  std=  0.851  p95= 164.358 ms  thr=  295.0 img/s
+  input_gen_and_load      mean=  73.169 ms  std=  1.017  p95=  74.848 ms  thr=  656.0 img/s
+  cos_sim                 mean=   0.297 ms  std=  0.011  p95=   0.311 ms  thr=161616.2 img/s
+
+GPU temp: 34.0 -> 34.0 C  (min=34.0, max=34.0)
+wrote: /home/piawsa6000/kurnianto/pia-speed_compare/results/ftpe_int8_NVIDIA_RTX_A6000_b16_t3_20260520_003959.json
+
+[FT_PE_INT8] === random-image cos/MSE vs PT BF16 ===
+[FT_PE_INT8] engines:    assets/QAT/ftpe/engines
+[FT_PE_INT8] PT ckpt:    src/FTPE_INT8/.hf_cache/ftpe/splitqkv_qat_t3/qat_deploy_fp32.pt
+[FT_PE_INT8] B=16  T=3  iters=5  min_cos=0.99  max_mse=1e-3
+[05/20/2026-00:40:42] [TRT] [W] Using default stream in enqueueV3() may lead to performance issues due to additional calls to cudaStreamSynchronize() by TensorRT to ensure correct synchronization. Please use non-default stream instead.
+[05/20/2026-00:40:43] [TRT] [W] Using default stream in enqueueV3() may lead to performance issues due to additional calls to cudaStreamSynchronize() by TensorRT to ensure correct synchronization. Please use non-default stream instead.
+[05/20/2026-00:40:44] [TRT] [W] Using default stream in enqueueV3() may lead to performance issues due to additional calls to cudaStreamSynchronize() by TensorRT to ensure correct synchronization. Please use non-default stream instead.
+[test] config=PE-Core-L14-336  B=16  T=3  BT=48  iters=5
+[test] ft_ckpt: src/FTPE_INT8/.hf_cache/ftpe/splitqkv_qat_t3/qat_deploy_fp32.pt
+[test] engine_dir: assets/QAT/ftpe/engines
+[test] loading PT BF16 reference ...
+   [ft_loader] detected QKV layout: split  arch: PE-Core-L14-336-splitqkv
+[test] PT BF16 loaded in 4.7s  (image_size=336)
+[test] found 3 engines: ['bf16_ftpe_dyn_b4-128_t3.engine', 'int8_ftpe_dyn_b4-128_t3.engine', 'int8_ftpe_dyn_b4-128_t3_crl.engine']
+
+[test] precomputing 5 random-batch PT references ...
+[test] freeing PT BF16 to make room for TRT contexts ...
+  bf16_ftpe_dyn_b4-128_t3: iter-0 cos=1.0000
+  int8_ftpe_dyn_b4-128_t3: iter-0 cos=0.9692
+  int8_ftpe_dyn_b4-128_t3_crl: iter-0 cos=0.9912
+
+[test] results (mean over 5 iters)
+
+  engine                                                   cos          mse   verdict
+  --------------------------------------------------------------------------------
+  bf16_ftpe_dyn_b4-128_t3                             0.999956    8.855e-08   PASS
+  int8_ftpe_dyn_b4-128_t3                             0.969060    6.043e-05   FAIL
+  int8_ftpe_dyn_b4-128_t3_crl                         0.991237    1.712e-05   PASS
+
+[test] thresholds: cos >= 0.99   mse <= 1e-03
+[test] appended cos_mse section to: /home/piawsa6000/kurnianto/pia-speed_compare/results/ftpe_int8_NVIDIA_RTX_A6000_b16_t3_20260520_003959.json
+[test] FAIL — one or more engines did not meet the threshold
+[FT_PE_INT8] cos/MSE check exited non-zero (engine(s) below threshold)

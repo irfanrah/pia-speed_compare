@@ -1,0 +1,23 @@
+[FT_PE] engine: assets/model/FT_PE-Core-L14-336_260318_vision_no_mean_pooling.engine
+[FT_PE] text features: assets/model/FT_text_features.json
+[FT_PE] batch=28 frames=3 warmup=5 iters=25
+[prepare] ONNX already at assets/model/FT_text_features.json (2.1 MB)
+[prepare] engine already at assets/model/FT_PE-Core-L14-336_260318_vision_no_mean_pooling.engine (646.2 MB) - skipping
+model:  FT_PE (ft_pe)  via FTPEService._detect
+engine: assets/model/FT_PE-Core-L14-336_260318_vision_no_mean_pooling.engine
+txtfts: assets/model/FT_text_features.json
+T:      3  (window_size driven by --frames)
+image:  /home/piawsa6000/kurnianto/pia-speed_compare/assets/images/kkpolice_1.jpg
+gpu:    NVIDIA RTX A6000  (sm 8.6, 48676 MiB)
+batch:  28  frames: 3  warmup: 5  iters: 25
+start:  2026-05-20T01:14:12
+[pool] generated 1204 frames = 43 batches × 28  (7.49 GB)  (includes buffer_warmup=13 for T=3)
+
+  full_cycle   mean= 482.681 ms  std= 10.294  p95= 484.331 ms  thr=  174.0 img/s
+  half_cycle   mean= 482.219 ms  std= 10.295  p95= 483.868 ms  thr=  174.2 img/s
+  inference    mean= 386.858 ms  std=  3.028  p95= 390.884 ms  thr=  217.1 img/s
+  input_gen_and_load  mean= 131.527 ms  std=  9.900  p95= 135.613 ms  thr=  638.6 img/s
+  cos_sim      mean=   0.303 ms  std=  0.014  p95=   0.328 ms  thr=277227.7 img/s
+
+GPU temp: 34.0 -> 34.0 C  (min=34.0, max=34.0)
+wrote: /home/piawsa6000/kurnianto/pia-speed_compare/results/ftpe_NVIDIA_RTX_A6000_b28_t3_20260520_011412.json

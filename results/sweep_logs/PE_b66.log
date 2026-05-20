@@ -1,0 +1,22 @@
+[PE] engine: assets/model/PE-Core-L14-336.engine
+[PE] text features: assets/model/text_features.json
+[PE] batch=66 warmup=5 iters=25
+[prepare] ONNX already at assets/model/text_features.json (473.3 MB)
+[prepare] engine already at assets/model/PE-Core-L14-336.engine (642.0 MB) - skipping
+model:  PE (perception_encoder)  via PEService._detect
+engine: assets/model/PE-Core-L14-336.engine
+txtfts: assets/model/text_features.json
+image:  /home/piawsa6000/kurnianto/pia-speed_compare/assets/images/kkpolice_1.jpg
+gpu:    NVIDIA RTX A6000  (sm 8.6, 48676 MiB)
+batch:  66    warmup: 5    iters: 25
+start:  2026-05-20T03:48:38
+[pool] generated 1980 frames = 30 batches × 66  (12.32 GB)
+
+  full_cycle   mean= 768.934 ms  std=  5.173  p95= 775.966 ms  thr=   85.8 img/s
+  half_cycle   mean= 745.029 ms  std=  5.010  p95= 752.085 ms  thr=   88.6 img/s
+  inference    mean= 526.654 ms  std=  5.169  p95= 535.167 ms  thr=  125.3 img/s
+  input_gen_and_load  mean= 298.832 ms  std=  3.395  p95= 304.406 ms  thr=  220.9 img/s
+  cos_sim      mean=   5.507 ms  std=  0.010  p95=   5.521 ms  thr=11984.8 img/s
+
+GPU temp: 34.0 -> 34.0 C  (min=33.0, max=34.0)
+wrote: /home/piawsa6000/kurnianto/pia-speed_compare/results/pe_NVIDIA_RTX_A6000_b66_20260520_034838.json
