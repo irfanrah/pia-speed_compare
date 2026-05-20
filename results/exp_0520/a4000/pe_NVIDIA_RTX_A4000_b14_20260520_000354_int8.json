@@ -1,0 +1,110 @@
+{
+  "model": "PE-Core-L14-336",
+  "code_path": "PEService._detect (split stages)",
+  "initial_time": "2026-05-20T00:03:54",
+  "gpu_type": "NVIDIA RTX A4000",
+  "gpu": {
+    "name": "NVIDIA RTX A4000",
+    "device_index": 0,
+    "compute_capability": "8.6",
+    "total_memory_mib": 16108,
+    "driver_version": "535.183.01"
+  },
+  "batch_size": 14,
+  "engine_path": "assets/QAT/pe/engines/int8_pe_dyn_b1-16_t1.engine",
+  "text_features_path": "assets/model/text_features.json",
+  "image_path": "/home/kurnianto/code/pia-speed_compare/assets/images/kkpolice_1.jpg",
+  "input_size": [
+    3,
+    336,
+    336
+  ],
+  "warmup_iters": 1,
+  "measure_iters": 1,
+  "torch_version": "2.9.1+cu128",
+  "cuda_runtime": "12.8",
+  "stages": {
+    "full_cycle": {
+      "mean_ms": 722.096,
+      "median_ms": 722.096,
+      "p95_ms": 722.096,
+      "p99_ms": 722.096,
+      "min_ms": 722.096,
+      "max_ms": 722.096,
+      "std_ms": 0.0
+    },
+    "half_cycle": {
+      "mean_ms": 702.147,
+      "median_ms": 702.147,
+      "p95_ms": 702.147,
+      "p99_ms": 702.147,
+      "min_ms": 702.147,
+      "max_ms": 702.147,
+      "std_ms": 0.0
+    },
+    "inference": {
+      "mean_ms": 581.928,
+      "median_ms": 581.928,
+      "p95_ms": 581.928,
+      "p99_ms": 581.928,
+      "min_ms": 581.928,
+      "max_ms": 581.928,
+      "std_ms": 0.0
+    },
+    "input_gen_and_load": {
+      "mean_ms": 102.962,
+      "median_ms": 102.962,
+      "p95_ms": 102.962,
+      "p99_ms": 102.962,
+      "min_ms": 102.962,
+      "max_ms": 102.962,
+      "std_ms": 0.0
+    },
+    "cos_sim": {
+      "mean_ms": 2.265,
+      "median_ms": 2.265,
+      "p95_ms": 2.265,
+      "p99_ms": 2.265,
+      "min_ms": 2.265,
+      "max_ms": 2.265,
+      "std_ms": 0.0
+    }
+  },
+  "throughput": {
+    "full_cycle_imgs_per_s": 19.39,
+    "half_cycle_imgs_per_s": 19.94,
+    "inference_imgs_per_s": 24.06,
+    "input_gen_and_load_imgs_per_s": 135.97,
+    "cos_sim_imgs_per_s": 6181.02
+  },
+  "iterations": {
+    "iter": [
+      0
+    ],
+    "full_cycle_ms": [
+      722.096
+    ],
+    "half_cycle_ms": [
+      702.147
+    ],
+    "inference_ms": [
+      581.928
+    ],
+    "input_gen_and_load_ms": [
+      102.962
+    ],
+    "cos_sim_ms": [
+      2.265
+    ],
+    "gpu_temp_c": [
+      97.0
+    ]
+  },
+  "gpu_temperature_c": {
+    "start": 98.0,
+    "end": 97.0,
+    "min": 97.0,
+    "max": 97.0,
+    "mean": 97.0
+  }
+}
